@@ -1,0 +1,27 @@
+# ── Node.js ────────────────────────────────────────────────────────────────
+node_modules/
+dist/
+npm-debug.log
+yarn-error.log
+
+# ── Environment Variables ──────────────────────────────────────────────────
+.env
+*.env
+.env.*
+
+# ── Project Specific (Backend) ─────────────────────────────────────────────
+backend/session-store/
+backend/*.html
+backend/*sample*.json
+backend/ig_sample.json
+backend/li_sample.json
+
+# ── Root Temporary Files ───────────────────────────────────────────────────
+temp_docker/
+chat_extracted.txt
+output.txt
+concatenated_all_documents.md
+
+# ── OS Generated ───────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db

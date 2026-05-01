@@ -1,0 +1,622 @@
+
+
+
+
+SOFTWARE REQUIREMENTS SPECIFICATION
+Social Trend Intelligence Backend
+
+
+
+Version 1.0  |  April 2026
+Status: Ready for Development
+
+
+
+Modular Monolith  ·  Node.js + TypeScript  ·  PostgreSQL  ·  BullMQ  ·  Redis
+
+
+1. Executive Summary
+This document is the complete Software Requirements Specification (SRS) for the Social Trend Intelligence Backend - a production-grade data pipeline system that scrapes social media content from Instagram and LinkedIn, extracts hashtags and engagement metrics, filters posts against configurable thresholds, stores normalized analytics in PostgreSQL, and exposes the data through versioned REST APIs for frontend dashboard consumption.
+
+The system is designed as a Modular Monolith with service-oriented internal boundaries. Every module is written to operate independently enough that a future team could extract it into a standalone microservice without rewriting business logic. The backend is not tied to any frontend and acts as a reusable analytics engine.
+
+1.1 System Purpose
+The core business goal is to identify trending hashtags on social platforms based on engagement signals. Scraped posts meeting configurable engagement thresholds (likes, comments, shares, views) are parsed for hashtags. Those hashtags accumulate frequency and engagement scores over time, eventually powering a trend dashboard.
+
+1.2 Design Philosophy
+Three principles govern every design decision in this specification:
+• Scraper collects. Parser creates meaning. Store only what you query. These are the three jobs and they must remain separated.
+• Database constraints enforce correctness. Application code handles business logic. Never swap these responsibilities.
+• Raw data is a debugging checkpoint, not permanent truth. Normalized, structured data is the real asset.
+
+1.3 Technology Stack
+LayerTechnologyPurposeRuntimeNode.js + TypeScriptBackend server, workers, scrapersWeb FrameworkExpress.jsREST API routing and middlewareDatabasePostgreSQL 15+Normalized data storageQueueBullMQAsync job management across pipeline stagesQueue TransportRedisBullMQ backbone + API response cachingBrowser AutomationPlaywrightHeadless scraping with browser poolMigrationsFlyway / node-pg-migrateVersioned schema managementLoggingpino / winstonStructured JSON logsContainerizationDocker + docker-composeEnvironment isolation and orchestration
+
+2. System Architecture
+2.1 Architecture Style
+The backend is a Modular Monolith. It deploys as a single process but is internally structured into modules that own their own services, repositories, DTOs, and queue workers. Modules communicate only through typed service interfaces or queue payloads - never by direct table access across module boundaries. This means a developer working inside the hashtags module cannot directly write to the posts table; they must call into the posts service.
+
+This design deliberately avoids premature microservices while keeping the future extraction path clear. If the scraper module needs to scale independently later, it can be extracted without touching any other module's code.
+
+2.2 Data Pipeline Flow
+The complete ingestion lifecycle follows this sequence:
+
+Trigger (Scheduler / Manual API)
+       ?
+Target Resolver  ?  determines: feed / keyword / profile
+       ?
+scrapeQueue  (BullMQ)
+       ?
+Scraper Worker  ?  Playwright browser pool
+       ?
+Raw Payload stored in raw_payloads table (24-72h TTL)
+       ?
+parseQueue  (BullMQ)
+       ?
+Parser Worker  ?  extracts hashtags + engagement
+       ?
+thresholdQueue  (BullMQ)
+       ?
+Threshold Worker  ?  validates against threshold_rules
+       ?
+PostgreSQL  ?  posts + hashtags + post_hashtags
+       ?
+REST API  ?  dashboard consumption
+
+2.3 Module Map
+ModulePrimary ResponsibilitiesscraperPlatform connector execution, feed/keyword/profile crawling, browser pool management, raw payload creationparserHashtag extraction, engagement parsing, normalization, platform-specific selector rules, multi-strategy extractionpostsPost entity ownership, post repository, deduplication via UPSERT, soft-delete enforcementhashtagsHashtag entity ownership, hashtag repository, post_hashtags join table managementthresholdThreshold rule lookup, engagement qualification decisions, rule configuration managementapiREST endpoint controllers, auth middleware, request validation, response shapingqueueBullMQ setup, queue registration, DTO contracts, queue lifecycle managementworkerConcurrent job processing, retry lifecycle, dead-letter handling, worker crash recoverycacheRedis caching layer, TTL management, cache invalidation strategieshealthLiveness/readiness endpoints, dependency health checks (DB, Redis, queues)monitoringStructured logging, metric collection, queue observability, system observability
+2.4 Folder Structure
+/src
++-- /modules
+¦   +-- /scraper
+¦   ¦   +-- /connectors      # instagram/, linkedin/, interface.ts
+¦   ¦   +-- /targets         # feed, keyword, profile resolvers
+¦   ¦   +-- /triggers        # scheduler, manual trigger handlers
+¦   ¦   +-- /raw-storage     # raw_payloads write + cleanup
+¦   ¦   +-- /worker          # scrapeQueue consumer
+¦   ¦   +-- dto/
+¦   ¦   +-- service.ts
+¦   +-- /parser
+¦   ¦   +-- /extractors      # htmlExtractor, apiExtractor, graphqlExtractor
+¦   ¦   +-- /platforms       # instagram/{selectors,extractor,validator}
+¦   ¦   ¦                    # linkedin/{selectors,extractor,validator}
+¦   ¦   +-- /normalizer      # unified output shaping
+¦   ¦   +-- /worker          # parseQueue consumer
+¦   ¦   +-- service.ts
+¦   +-- /posts               # PostService, PostRepository
+¦   +-- /hashtags            # HashtagService, HashtagRepository
+¦   +-- /threshold           # ThresholdService, ThresholdRepository
+¦   +-- /api                 # controllers, middleware, routes/v1/
+¦   +-- /health              # HealthController
+¦   +-- /monitoring          # Logger, MetricsCollector
++-- /shared
+¦   +-- /errors              # BaseAppError, ErrorCodes, ErrorMiddleware
+¦   +-- /response-builder    # successResponse(), errorResponse()
+¦   +-- /filter-parser       # QueryFilterBuilder
+¦   +-- /browser-pool        # BrowserPool manager
+¦   +-- /session-manager     # SessionStore, SessionValidator
+¦   +-- /throttler           # AdaptiveThrottler
+¦   +-- /logger              # structured logger wrapper
++-- /config                  # env, redis, postgres, queue configs
++-- /database                # migrations/, connection pool
++-- /queues                  # queue definitions + DTO schemas
++-- app.ts                   # express app bootstrap
++-- server.ts                # http server + worker startup
+
+
+3. Database Schema
+3.1 Schema Design Decisions
+The schema uses a hybrid model: posts are the source of truth for ingestion traceability, while hashtags are the primary query surface for analytics. Engagement metrics are stored as columns directly on the posts table (no separate engagement table) since historical tracking is not required in v1. Author data is stored inline as nullable fields. Platform is a first-class entity with its own table.
+
+All timestamps use TIMESTAMPTZ (UTC). Soft-deletes are used throughout. The composite unique constraint on (post_id, platform_id) drives idempotent UPSERT behavior. Primary keys use BIGSERIAL for posts (high volume) and SERIAL for lower-cardinality tables.
+
+3.2 Table: platforms
+Stores every registered social platform. Platform connectors reference this table, and posts carry a foreign key to it. This allows dynamic platform management without code changes.
+
+ColumnTypeNullableDefaultNotesidSERIALNOautoPrimary keynameTEXTNO-Unique. e.g. 'instagram', 'linkedin'slugTEXTNO-URL-safe identifier used in API routingis_activeBOOLEANNOtrueDisable without deletingscrape_interval_minINTEGERYESNULLScheduled scrape frequency in minutesconfigJSONBYESNULLPlatform-specific settings (rate limits, selectors version, etc.)created_atTIMESTAMPTZNONOW()Record creation timestampupdated_atTIMESTAMPTZNONOW()Auto-updated on change via trigger
+Constraints: PRIMARY KEY (id), UNIQUE (name), UNIQUE (slug).
+
+3.3 Table: posts
+The central ingestion table. Each row represents one unique post from one platform. The UNIQUE(post_id, platform_id) constraint is the backbone of idempotent ingestion - re-scraping the same post updates the row rather than creating a duplicate.
+
+ColumnTypeNullableDefaultNotesidBIGSERIALNOautoInternal surrogate PKplatform_idINTEGERNO-FK ? platforms.idpost_idTEXTNO-Platform-native post identifierauthor_idTEXTYESNULLAuthor's platform-specific user IDauthor_usernameTEXTYESNULLAuthor's display usernamecaptionTEXTYESNULLPost caption / body text (cleaned)content_htmlTEXTYESNULLRaw HTML fragment from scrapercontent_jsonJSONBYESNULLStructured parsed payload (API/GraphQL)likesINTEGERNO0Total likes countcommentsINTEGERNO0Total comments countsharesINTEGERNO0Total shares / reposts countviewsBIGINTNO0Total views count (BIGINT for viral posts)source_typeTEXTNO-'feed' | 'keyword' | 'profile'posted_atTIMESTAMPTZYESNULLWhen post was originally created on platformscraped_atTIMESTAMPTZNONOW()When our system ingested the postthreshold_passedBOOLEANNOfalseDid this post pass engagement threshold?raw_payload_idUUIDYESNULLReference to raw_payloads recorddeleted_atTIMESTAMPTZYESNULLSoft-delete. NULL means active.
+Constraints: PRIMARY KEY (id), UNIQUE (post_id, platform_id), FOREIGN KEY (platform_id) REFERENCES platforms(id).
+
+Indexes:
+• UNIQUE index on (post_id, platform_id) - enforces deduplication, also drives ON CONFLICT for UPSERT.
+• Partial B-tree index on (platform_id, scraped_at) WHERE deleted_at IS NULL - fast time-range queries per platform.
+• B-tree index on posted_at - sorting by original post time.
+• B-tree index on (platform_id, likes) - engagement-based filtering.
+• B-tree index on threshold_passed - fast access to qualified posts only.
+
+3.4 Table: hashtags
+Each hashtag is stored exactly once. Deduplication is enforced by a UNIQUE constraint on the tag text. Posts reference hashtags through the post_hashtags join table, creating a proper many-to-many relationship.
+
+ColumnTypeNullableDefaultNotesidBIGSERIALNOautoPrimary keytagTEXTNO-Normalized lowercase e.g. 'ai', 'startup' (without #)first_seen_atTIMESTAMPTZNONOW()When hashtag was first encounteredlast_seen_atTIMESTAMPTZNONOW()Updated on each new post associationpost_countINTEGERNO0Denormalized count, updated on upsert (speeds trend queries)
+Constraints: PRIMARY KEY (id), UNIQUE (tag).
+
+Note on tag normalization: hashtags should be lowercased and stripped of the leading '#' character before insertion. This means '#AI' and '#ai' resolve to the same row with tag='ai'.
+
+3.5 Table: post_hashtags
+The many-to-many join table linking posts to hashtags. A post can have multiple hashtags; a hashtag can appear in multiple posts. A composite primary key on (post_id, hashtag_id) prevents duplicate associations.
+
+ColumnTypeNullableDefaultNotespost_idBIGINTNO-FK ? posts.idhashtag_idBIGINTNO-FK ? hashtags.idplatform_idINTEGERNO-Denormalized for fast platform-scoped hashtag queriesassociated_atTIMESTAMPTZNONOW()When the hashtag was linked to this post
+Constraints: PRIMARY KEY (post_id, hashtag_id), FOREIGN KEY (post_id) REFERENCES posts(id) ON DELETE CASCADE, FOREIGN KEY (hashtag_id) REFERENCES hashtags(id).
+
+Indexes: B-tree on hashtag_id (for reverse lookups - find all posts for a hashtag), B-tree on (hashtag_id, platform_id) for platform-scoped hashtag frequency queries.
+
+3.6 Table: raw_payloads
+Temporary storage for scraped raw data. Raw payloads exist to support parser retry, debugging, and replay. They are not the primary data asset and are automatically cleaned up after 24-72 hours via a scheduled cleanup worker.
+
+ColumnTypeNullableDefaultNotesidUUIDNOgen_random_uuid()Primary key (UUID for reference safety)platform_idINTEGERNO-FK ? platforms.idjob_idTEXTNO-BullMQ job ID that produced this payloadsource_typeTEXTNO-'feed' | 'keyword' | 'profile'payload_htmlTEXTYESNULLRaw HTML fragmentpayload_jsonJSONBYESNULLStructured API/GraphQL response bodyparse_statusTEXTNO'pending''pending' | 'success' | 'failed' | 'retrying'created_atTIMESTAMPTZNONOW()Ingestion timestampexpires_atTIMESTAMPTZNONOW()+72hCleanup worker deletes after this time
+Indexes: B-tree on expires_at (cleanup worker queries this), B-tree on (platform_id, parse_status) (retry worker queries pending/failed records).
+
+3.7 Table: threshold_rules
+Configurable engagement thresholds per platform. Values are not hardcoded in application logic. The threshold worker reads from this table at runtime, making it possible to adjust thresholds without deploying new code.
+
+ColumnTypeNullableDefaultNotesidSERIALNOautoPrimary keyplatform_idINTEGERNO-FK ? platforms.idmetric_nameTEXTNO-'likes' | 'comments' | 'shares' | 'views'operatorTEXTNO'gte'Comparison operator: 'gte' | 'gt' | 'lte' | 'lt'threshold_valueBIGINTNO-The threshold numberis_activeBOOLEANNOtrueDisable a rule without deleting itcreated_atTIMESTAMPTZNONOW()Created timestamp
+Example seed data: instagram / likes / gte / 100000, instagram / comments / gte / 5000, linkedin / likes / gte / 5000, linkedin / comments / gte / 100.
+
+3.8 Table: scrape_jobs
+Audit log for every scraping job initiated. Enables operational visibility into job history, failure rates, and per-platform scraping activity.
+
+ColumnTypeNullableNotesidUUIDNOPrimary keyplatform_idINTEGERNOFK ? platforms.idtrigger_typeTEXTNO'scheduler' | 'manual' | 'event'target_typeTEXTNO'feed' | 'keyword' | 'profile'target_valueTEXTYESKeyword or profile ID if applicablestatusTEXTNO'queued' | 'running' | 'completed' | 'failed'posts_scrapedINTEGERYESNumber of posts collected in this joberror_messageTEXTYESError detail if status = 'failed'started_atTIMESTAMPTZYESWhen the worker began processingcompleted_atTIMESTAMPTZYESWhen the job finished (success or fail)created_atTIMESTAMPTZNOWhen the job was queued
+3.9 Complete DDL Migration
+The following DDL creates the complete v1 schema. This should be placed in migration file V001__initial_schema.sql:
+
+-- Enable UUID generation
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+
+-- platforms
+CREATE TABLE platforms (
+  id                  SERIAL PRIMARY KEY,
+  name                TEXT NOT NULL UNIQUE,
+  slug                TEXT NOT NULL UNIQUE,
+  is_active           BOOLEAN NOT NULL DEFAULT true,
+  scrape_interval_min INTEGER,
+  config              JSONB,
+  created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- posts
+CREATE TABLE posts (
+  id                BIGSERIAL PRIMARY KEY,
+  platform_id       INTEGER NOT NULL REFERENCES platforms(id),
+  post_id           TEXT NOT NULL,
+  author_id         TEXT,
+  author_username   TEXT,
+  caption           TEXT,
+  content_html      TEXT,
+  content_json      JSONB,
+  likes             INTEGER NOT NULL DEFAULT 0,
+  comments          INTEGER NOT NULL DEFAULT 0,
+  shares            INTEGER NOT NULL DEFAULT 0,
+  views             BIGINT NOT NULL DEFAULT 0,
+  source_type       TEXT NOT NULL,
+  threshold_passed  BOOLEAN NOT NULL DEFAULT false,
+  raw_payload_id    UUID,
+  posted_at         TIMESTAMPTZ,
+  scraped_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  deleted_at        TIMESTAMPTZ,
+  UNIQUE (post_id, platform_id)
+);
+
+CREATE INDEX idx_posts_platform_scraped
+  ON posts(platform_id, scraped_at)
+  WHERE deleted_at IS NULL;
+CREATE INDEX idx_posts_posted_at ON posts(posted_at);
+CREATE INDEX idx_posts_platform_likes ON posts(platform_id, likes)
+  WHERE deleted_at IS NULL;
+CREATE INDEX idx_posts_threshold ON posts(threshold_passed)
+  WHERE deleted_at IS NULL;
+
+-- hashtags
+CREATE TABLE hashtags (
+  id           BIGSERIAL PRIMARY KEY,
+  tag          TEXT NOT NULL UNIQUE,
+  post_count   INTEGER NOT NULL DEFAULT 0,
+  first_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  last_seen_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- post_hashtags
+CREATE TABLE post_hashtags (
+  post_id       BIGINT NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
+  hashtag_id    BIGINT NOT NULL REFERENCES hashtags(id),
+  platform_id   INTEGER NOT NULL REFERENCES platforms(id),
+  associated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (post_id, hashtag_id)
+);
+CREATE INDEX idx_ph_hashtag ON post_hashtags(hashtag_id);
+CREATE INDEX idx_ph_hashtag_platform ON post_hashtags(hashtag_id, platform_id);
+
+-- raw_payloads
+CREATE TABLE raw_payloads (
+  id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  platform_id  INTEGER NOT NULL REFERENCES platforms(id),
+  job_id       TEXT NOT NULL,
+  source_type  TEXT NOT NULL,
+  payload_html TEXT,
+  payload_json JSONB,
+  parse_status TEXT NOT NULL DEFAULT 'pending',
+  created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  expires_at   TIMESTAMPTZ NOT NULL DEFAULT NOW() + INTERVAL '72 hours'
+);
+CREATE INDEX idx_raw_expires ON raw_payloads(expires_at);
+CREATE INDEX idx_raw_status ON raw_payloads(platform_id, parse_status);
+
+-- threshold_rules
+CREATE TABLE threshold_rules (
+  id              SERIAL PRIMARY KEY,
+  platform_id     INTEGER NOT NULL REFERENCES platforms(id),
+  metric_name     TEXT NOT NULL,
+  operator        TEXT NOT NULL DEFAULT 'gte',
+  threshold_value BIGINT NOT NULL,
+  is_active       BOOLEAN NOT NULL DEFAULT true,
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- scrape_jobs
+CREATE TABLE scrape_jobs (
+  id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  platform_id   INTEGER NOT NULL REFERENCES platforms(id),
+  trigger_type  TEXT NOT NULL,
+  target_type   TEXT NOT NULL,
+  target_value  TEXT,
+  status        TEXT NOT NULL DEFAULT 'queued',
+  posts_scraped INTEGER,
+  error_message TEXT,
+  started_at    TIMESTAMPTZ,
+  completed_at  TIMESTAMPTZ,
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+
+4. API Endpoint Catalog
+4.1 API Conventions
+All endpoints are prefixed with /api/v1. Every response follows the structured envelope format defined in Decision 19. Authentication is via API key in the x-api-key header. Cursor-based pagination is used on all collection endpoints. Timestamps in query parameters must be ISO 8601 UTC. All responses return Content-Type: application/json.
+
+Standard success envelope:
+{ "success": true, "data": [...], "meta": { "nextCursor": "...", "limit": 20 } }
+
+Standard error envelope:
+{ "success": false, "error": { "code": "VALIDATION_ERROR", "message": "..." } }
+
+4.2 Post Endpoints
+
+GET /api/v1/posts
+Returns a paginated list of ingested posts. Supports rich filtering.
+Query ParamTypeDescriptionplatformstringFilter by platform slug (e.g. 'instagram')sourcestringFilter by source_type: 'feed' | 'keyword' | 'profile'thresholdPassedbooleanFilter to only posts that passed engagement thresholdhashtagstringFilter posts containing this hashtagminLikesintegerPosts with likes >= this valueminCommentsintegerPosts with comments >= this valuefromISO 8601Filter: posted_at >= fromtoISO 8601Filter: posted_at <= tocursorstringOpaque pagination cursor from previous responselimitintegerRecords per page. Default: 20, Max: 100
+Returns: 200 with posts array and nextCursor. 400 if params are invalid.
+
+GET /api/v1/posts/:id
+Returns a single post by internal surrogate ID. Returns 404 if the post does not exist or is soft-deleted.
+
+DELETE /api/v1/posts/:id
+Soft-deletes a post by setting deleted_at to the current timestamp. The post remains in the database for audit purposes. Requires admin-level API key. Returns 200 with the updated record.
+
+4.3 Hashtag Endpoints
+
+GET /api/v1/hashtags
+Returns paginated hashtags. The primary analytics endpoint - used by the dashboard to show trending tags.
+Query ParamTypeDescriptionplatformstringFilter hashtags seen on this platform onlyfromISO 8601first_seen_at >= fromtoISO 8601last_seen_at <= tosortBystring'post_count' | 'last_seen_at'. Default: post_countcursorstringPagination cursorlimitintegerRecords per page. Default: 20, Max: 100
+GET /api/v1/hashtags/:tag
+Returns a single hashtag record by tag text (without the # symbol). Also returns the associated posts list with cursor pagination. Returns 404 if the hashtag has never been seen.
+
+GET /api/v1/hashtags/:tag/posts
+Returns paginated posts that contain the specified hashtag. Supports the same platform and date filters as the main posts endpoint.
+
+4.4 Platform Endpoints
+
+GET /api/v1/platforms
+Returns all registered platforms. No pagination needed - platform count is always small.
+
+GET /api/v1/platforms/:slug
+Returns a single platform by slug. Includes scrape_interval_min and is_active fields. Returns 404 if platform not found.
+
+4.5 Scraper Trigger Endpoints
+
+POST /api/v1/scraper/run
+Manually triggers a scraping job. Enqueues a job to scrapeQueue and returns immediately with a job reference. Does not wait for scraping to complete.
+Request body:
+{
+  "platform": "instagram",        // required
+  "targetType": "keyword",        // "feed" | "keyword" | "profile"
+  "targetValue": "AI",            // required if targetType != "feed"
+  "priority": "normal"            // "high" | "normal" | "low"
+}
+
+Returns 202 Accepted with jobId and estimated queue position. Returns 400 if platform is unknown or targetValue is missing when required. Requires admin API key.
+
+GET /api/v1/scraper/jobs
+Returns paginated scrape_jobs records. Supports filtering by platform, status, trigger_type, and date range. Used for operational monitoring.
+
+GET /api/v1/scraper/jobs/:jobId
+Returns the status and details of a specific scraping job. Useful for polling after a manual trigger.
+
+4.6 Admin Endpoints
+
+GET /api/v1/admin/threshold-rules
+Returns all threshold rules across all platforms. Requires admin API key.
+
+POST /api/v1/admin/threshold-rules
+Creates a new threshold rule. Request body must include platform_id, metric_name, operator, and threshold_value. Requires admin API key.
+
+PATCH /api/v1/admin/threshold-rules/:id
+Updates an existing threshold rule (e.g. to change threshold_value or toggle is_active). Requires admin API key.
+
+DELETE /api/v1/admin/threshold-rules/:id
+Deletes a threshold rule permanently. Use is_active=false for non-destructive disable. Requires admin API key.
+
+POST /api/v1/admin/platforms
+Registers a new platform. Seeds the platforms table. Requires admin API key.
+
+PATCH /api/v1/admin/platforms/:slug
+Updates platform configuration (is_active, scrape_interval_min, config JSONB). Requires admin API key.
+
+4.7 Health Endpoints
+
+GET /health
+Lightweight liveness probe. Returns 200 {"status":"ok"} immediately. Used by Docker/load balancer for container health checks. No authentication required. No database queries.
+
+GET /api/v1/health
+Deep readiness probe. Checks PostgreSQL connectivity, Redis connectivity, and BullMQ queue health. Returns 200 if all dependencies are healthy, 503 if any dependency is down.
+Response body:
+{
+  "status": "healthy",
+  "services": {
+    "database": "connected",
+    "redis": "connected",
+    "scrapeQueue": "running",
+    "parseQueue": "running",
+    "thresholdQueue": "running"
+  },
+  "uptime": 84200
+}
+
+4.8 UPSERT SQL Contract
+All post ingestion uses the following idempotent UPSERT pattern. This is the canonical write path for the post entity and must not be bypassed:
+
+INSERT INTO posts (platform_id, post_id, author_id, author_username,
+  caption, content_html, content_json, likes, comments, shares, views,
+  source_type, raw_payload_id, posted_at, scraped_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, NOW())
+ON CONFLICT (post_id, platform_id)
+DO UPDATE SET
+  author_id       = EXCLUDED.author_id,
+  author_username = EXCLUDED.author_username,
+  caption         = EXCLUDED.caption,
+  content_html    = EXCLUDED.content_html,
+  content_json    = EXCLUDED.content_json,
+  likes           = EXCLUDED.likes,
+  comments        = EXCLUDED.comments,
+  shares          = EXCLUDED.shares,
+  views           = EXCLUDED.views,
+  posted_at       = GREATEST(posts.posted_at, EXCLUDED.posted_at),
+  scraped_at      = NOW()
+RETURNING id;
+
+
+5. Parser Architecture
+5.1 Parser's Role in the Pipeline
+The parser is the intelligence layer between raw scraped content and structured database records. While the scraper is responsible for navigation and collection, the parser is responsible for meaning extraction. The two must remain strictly separated - the scraper knows nothing about data structure, and the parser knows nothing about browser automation.
+
+Parser input: a raw_payloads record containing HTML and/or JSON from the scraper. Parser output: a normalized PostDTO that flows into the threshold worker and eventually into PostgreSQL.
+
+5.2 Parser Processing Stages
+Stage 1: Payload Identification
+  ? Inspect payload_html and payload_json
+  ? Determine platform (from metadata)
+  ? Select extraction strategy: html | api | graphql
+
+Stage 2: Primary Extraction
+  ? Load platform-specific selector rules
+  ? Apply CSS selectors to HTML fragment
+  ? OR parse API/GraphQL JSON fields
+
+Stage 3: Fallback Extraction
+  ? If primary extraction yields empty fields:
+  ? Try embedded JSON (window.__INITIAL_STATE__)
+  ? Try regex patterns as last resort
+
+Stage 4: Field Normalization
+  ? Map platform-specific field names to unified schema
+  ? Parse and validate engagement numbers
+  ? Extract and normalize hashtags (lowercase, strip #)
+  ? Parse posted_at timestamp to UTC
+
+Stage 5: Validation
+  ? Reject payloads missing post_id
+  ? Flag payloads with zero extractable fields
+  ? Mark parse_status in raw_payloads
+
+Stage 6: Output
+  ? Emit normalized PostDTO to thresholdQueue
+
+5.3 Extraction Strategy Matrix
+StrategySourceWhen UsedhtmlExtractorDOM HTML fragmentPrimary for feed scraping. Uses CSS selectors.apiExtractorREST/XHR JSON responseWhen scraper intercepts platform API responses.graphqlExtractorGraphQL query responseLinkedIn primarily. Traverses node/edge tree.embeddedJsonExtractorwindow.__INITIAL_STATE__Fallback for Instagram when DOM is obfuscated.regexExtractorRaw HTML textLast resort. Extracts #hashtag patterns from text.
+5.4 Platform-Specific Rule Isolation
+Each platform has its own rule package containing selectors, field mappings, and fallback strategies. Adding a new platform means creating a new rule package - the parser core does not change.
+
+instagram/
+  selectors.ts    ? CSS selectors for caption, likes, comments
+  extractor.ts    ? Instagram-specific extraction logic
+  validator.ts    ? Instagram-specific field validation
+
+linkedin/
+  selectors.ts    ? CSS selectors for reactions, comments
+  extractor.ts    ? LinkedIn GraphQL traversal logic
+  validator.ts    ? LinkedIn-specific field validation
+
+5.5 Normalized PostDTO Output
+{
+  "platform": "instagram",
+  "platformPostId": "abc123",
+  "authorId": "user456",
+  "authorUsername": "example_user",
+  "caption": "Full post caption text",
+  "hashtags": ["ai", "startup", "tech"],
+  "likes": 142000,
+  "comments": 8900,
+  "shares": 3200,
+  "views": 1500000,
+  "postedAt": "2026-04-20T14:30:00Z",
+  "sourceType": "feed",
+  "rawPayloadId": "uuid-here",
+  "schemaVersion": "v1"
+}
+
+
+6. Queue and Worker System
+6.1 Queue Architecture
+BullMQ manages all async processing across four dedicated queues. Each queue represents one pipeline stage. Workers are scoped to their queue - a parse worker never pulls from scrapeQueue, and vice versa. This isolation means a failure in one stage does not cascade to others.
+
+QueueOwned ByConcurrencyJob TypesscrapeQueuescraper module3-5 per workerSCRAPE_FEED, SCRAPE_KEYWORD, SCRAPE_PROFILEparseQueueparser module10-15 per workerPARSE_POST_HTML, PARSE_POST_API, PARSE_POST_GRAPHQLthresholdQueuethreshold module20 per workerEVALUATE_THRESHOLDtrendQueuetrend module (future)5 per workerCOMPUTE_TREND - reserved for v2
+Scraper concurrency is lower because browser automation is CPU and memory intensive. Parser and threshold workers are lightweight CPU operations and can run at higher concurrency.
+
+6.2 Base Queue Job Contract
+Every job enqueued to any queue must conform to this base DTO. Module-specific queues extend this base contract.
+{
+  "jobId": "uuid-v4",           // BullMQ job ID
+  "jobType": "SCRAPE_FEED",     // identifies handler
+  "platform": "instagram",      // platform slug
+  "schemaVersion": "v1",        // payload version
+  "metadata": {
+    "trigger": "scheduler",     // "scheduler" | "manual"
+    "attempt": 1,              // current attempt number
+    "initiatedBy": "system"    // system | admin
+  },
+  "createdAt": "ISO-8601"       // job creation time
+}
+
+6.3 Retry Strategy
+All queues use exponential backoff with a cap of 4 total attempts. Social media content is time-sensitive - a job that has failed 4 times is likely stale or permanently broken, and indefinite retries would block queue throughput.
+
+AttemptDelayBehavior1 (initial)immediateFirst execution attempt210 secondsRetry with short backoff330 secondsRetry with medium backoff4 (final)60 secondsFinal attempt before dead-letterDLQ-Job moved to dead-letter queue with failure metadata
+6.4 Worker Lifecycle
+On startup, each worker registers its queue listener, establishes its concurrency settings, and begins polling. Workers implement graceful shutdown - they finish in-flight jobs before stopping, never abandoning a job mid-execution. On crash recovery, BullMQ's stalled job detection automatically re-enqueues jobs that were marked as active but had no heartbeat for more than 30 seconds.
+
+Worker startup sequence:
+1. Load environment config
+2. Establish Redis connection
+3. Register queue listener with concurrency
+4. Begin polling (BullMQ handles this internally)
+
+Worker shutdown sequence (SIGTERM received):
+1. Stop accepting new jobs
+2. Wait for in-flight jobs to complete (max 30s)
+3. Flush pending logs
+4. Close Redis connection
+5. Exit
+
+
+7. Scraper Architecture
+7.1 Platform Connector Interface
+Every platform connector must implement the following interface. This enforces consistency across connectors and makes the scraper module platform-agnostic at the orchestration level.
+
+interface PlatformConnector {
+  login(): Promise<void>;
+  validateSession(): Promise<boolean>;
+  scrollFeed(options: FeedOptions): AsyncGenerator<RawPostPayload>;
+  searchByKeyword(keyword: string): AsyncGenerator<RawPostPayload>;
+  scrapeProfile(profileId: string): AsyncGenerator<RawPostPayload>;
+  normalizeOutput(raw: unknown): NormalizedPostPayload;
+  getThrottleConfig(): ThrottleConfig;
+}
+
+7.2 Browser Pool
+A shared browser pool manages Playwright browser instances. Workers borrow a browser, create an isolated browser context for their job, execute scraping, close the context, and return the browser to the pool. This approach avoids the cost of launching a new browser for every job while maintaining full session isolation between jobs.
+
+Pool SettingValue / DescriptionmaxBrowsers3 per platform (configurable). Prevents excessive memory use.idleTimeout5 minutes. Browsers idle longer than this are closed and replaced.maxTabsPerBrowser1 (one context per browser per job). Maintains isolation.healthCheckInterval30 seconds. Unhealthy browsers are removed and replaced.platformIsolationSeparate pools per platform. Instagram pool ? LinkedIn pool.
+7.3 Session Management
+Sessions are persisted between scraping runs to avoid repeated logins, which reduces platform detection risk. The session manager loads a stored session at startup, validates it by making a lightweight authenticated request, and triggers re-login only when the session is invalid. Sessions are stored as browser context state (cookies + localStorage) in a local session-store directory.
+
+Session refresh is triggered by: session expiry, 401/redirect responses from the platform, captcha spike detection, or a scheduled rotation interval (configurable per platform).
+
+7.4 Adaptive Throttling
+The adaptive throttler monitors scraping health signals and adjusts request pacing dynamically. This is more resilient than fixed delays because platform behavior changes over time.
+
+SignalThrottler ResponseNormal operationBase delay between requests (e.g. 1-3s jitter)Elevated failure rateIncrease delay by backoff multiplierRate limit response (429)Enter cooldown period (e.g. 5 minutes)Captcha detectedPause scraping, notify via log alert, enter long cooldownQueue backlog clearingGradual acceleration back toward base delay
+
+8. Security
+8.1 API Authentication
+All API endpoints require an x-api-key header. Two key tiers exist: standard API keys for read-only endpoints (GET /posts, GET /hashtags), and admin API keys for write and management endpoints (scraper triggers, threshold management, platform management). Keys are stored as bcrypt hashes in a dedicated api_keys table and validated in the API key middleware before any controller logic runs.
+
+8.2 Scraper Credential Storage
+Platform login credentials (Instagram username/password, LinkedIn credentials) must not be stored in environment variables or source code. They must be stored in a secrets manager (HashiCorp Vault, AWS Secrets Manager, or equivalent). The scraper module fetches credentials at startup from the secrets manager and never logs or exposes them. Session tokens (cookies) are stored as files in a session-store directory with file permissions set to 600. The session-store directory must not be mounted in any shared volume.
+
+8.3 Database Security
+PostgreSQL uses separate roles per access pattern: an ingestion role with INSERT/UPDATE on posts, raw_payloads; a read role with SELECT on posts, hashtags, post_hashtags for API queries; an admin role with DDL privileges for migration runs only. Connection strings are never hardcoded - they are injected via environment variables at container startup. All connections use TLS (sslmode=require). Connection pooling (pg-pool or PgBouncer) is used to prevent connection exhaustion.
+
+8.4 Encryption and Transport
+All API traffic uses HTTPS (TLS 1.2+). The database disk is encrypted at rest. Redis data at rest is encrypted if using a managed Redis service. API keys and secrets are never logged under any log level.
+
+8.5 Input Validation
+All API request bodies and query parameters are validated using a schema validation library (zod or joi) before reaching controller logic. SQL injection is prevented entirely through parameterized queries - no string interpolation in SQL. Hashtag input is normalized and length-capped before insertion. Content fields (caption, content_html) are stored verbatim but never rendered server-side.
+
+
+9. Infrastructure and Deployment
+9.1 Container Layout
+The system runs as four Docker containers orchestrated by docker-compose in development and a container orchestration platform (Docker Swarm or Kubernetes) in production.
+
+ContainerBase ImageResponsibilitiesapinode:20-alpineExpress REST server. Exposes port 3000.workernode:20-alpineBullMQ workers for all queues. No exposed port.postgrespostgres:15-alpinePrimary database. Exposes port 5432 internally only.redisredis:7-alpineQueue transport + API cache. Exposes port 6379 internally only.
+The api and worker containers share the same Docker image build but are started with different entry points (server.ts vs workers.ts). This allows independent scaling of API replicas vs worker replicas without maintaining two separate images.
+
+9.2 Environment Configuration
+VariableDescriptionDATABASE_URLFull PostgreSQL connection string with credentialsREDIS_URLRedis connection stringAPI_KEY_SALTSalt for API key hashingNODE_ENV'development' | 'production'SCRAPER_CONCURRENCYNumber of concurrent scraper workersPARSER_CONCURRENCYNumber of concurrent parser workersRAW_PAYLOAD_TTL_HOURSHours before raw_payloads are deleted. Default: 72SECRETS_MANAGER_URLURL of the secrets manager for platform credentialsLOG_LEVEL'debug' | 'info' | 'warn' | 'error'. Default: info
+9.3 Redis Usage
+Redis serves two purposes: it is the transport layer for BullMQ (all four queues), and it is the API cache for high-frequency read endpoints. Cache TTL is 15-60 seconds for collection endpoints (GET /hashtags, GET /posts). Cache keys are invalidated explicitly when new posts are ingested or threshold rules are updated. Redis is not used for session storage or authentication state in v1.
+
+9.4 Database Backup Strategy
+Daily full backups with WAL-based continuous archiving for point-in-time recovery. Minimum retention is 30 days. If using a managed PostgreSQL service (AWS RDS, Supabase, Railway), enable automated backups and multi-AZ replication. Backups are encrypted at rest. Restore procedures must be tested quarterly.
+
+
+10. Observability
+10.1 Structured Logging
+All application logs are structured JSON emitted to stdout. Each log entry includes timestamp, module, event, jobId (where applicable), platform, status, duration, and error fields. Log level is controlled by the LOG_LEVEL environment variable. Log aggregation (ELK stack, Loki, or cloud equivalent) should collect stdout from all containers.
+
+Standard log entry structure:
+{ "timestamp": "2026-04-28T12:00:00Z", "level": "info",
+  "module": "parser", "event": "parse_success",
+  "jobId": "uuid", "platform": "instagram",
+  "durationMs": 342, "hashtagsExtracted": 5 }
+
+10.2 Key Metrics to Track
+MetricDescription and Alert Thresholdposts_ingested_per_minuteRate of successful post ingestion. Alert if zero for >15min.parse_failure_ratePercentage of parse jobs failing. Alert if >10%.queue_depth.[queue]Jobs waiting per queue. Alert if scrapeQueue > 500.dlq_job_countJobs in dead-letter queue. Alert if increasing rapidly.db_query_latency_p9999th percentile DB query time. Alert if >500ms.scraper_session_failuresSession validation failures per platform. Alert if >3 in 5min.cache_hit_rateRedis cache hit ratio for API endpoints. Target >80%.threshold_pass_ratePercentage of parsed posts that pass threshold. Sanity check.
+10.3 Queue Dashboard
+BullMQ Board or Bull-Board should be deployed as an internal admin tool (not publicly accessible) to provide a real-time view of queue depth, active workers, failed jobs, and DLQ contents. This is the primary operational tool for diagnosing pipeline stalls.
+
+
+11. Non-Functional Requirements
+
+CategoryRequirementPerformanceAPI response time P95 < 200ms for cached endpoints. P99 < 500ms for uncached. Scraper throughput: minimum 100 posts/hour per platform under normal conditions.ScalabilityAPI server and worker container are independently scalable horizontally. Adding more worker replicas increases queue throughput linearly. Database uses connection pooling to handle concurrent workers.ReliabilityNo job is permanently lost without appearing in DLQ. Worker crash recovery via BullMQ stalled job detection. Idempotent UPSERT means re-running any pipeline stage produces correct results.MaintainabilityAdding a new platform requires only: new connector file, new platform-specific parser rules, seed row in platforms table. No changes to shared modules, queue infrastructure, or API layer.AvailabilityTarget: 99.5% uptime for API server. Scraper downtime does not affect API availability. Database and Redis are the only shared infrastructure dependencies.Data IntegrityUNIQUE constraint on (post_id, platform_id) guarantees no duplicate posts. ON CONFLICT UPSERT guarantees idempotent writes. Soft-delete prevents accidental data loss.
+
+12. Architectural Decisions Log
+This section summarizes all 35 locked architectural decisions from the design sessions. Each decision is recorded with its rationale so future developers understand why the system is built the way it is.
+
+#DecisionRationaleRef Section1Generic platform connector frameworkFuture-proofs for TikTok, X, Reddit without redesigning the pipeline§2.3, §7.12Hybrid discovery: feed + keywordSupports both passive trending and targeted hashtag research§73Normalization layer per connectorUniversal queue payload; downstream pipeline is platform-agnostic§5.54Hybrid trigger: scheduler + manualAutomation runs autonomously; manual trigger supports testing§4.55Dedicated queue per pipeline stageFault isolation; each stage scales and fails independently§6.16Hybrid queue payload (normalized + raw ref)Queues stay lightweight; raw data stays retrievable for replay§6.27Concurrent worker modelHigher throughput; BullMQ concurrency is independently tunable per queue§6.18Database-configurable thresholdsThresholds can change without code deployment§3.79Post identity = (platform + platformPostId)Stable, globally unique within the system; safe for concurrent UPSERT§3.3, §4.810PostgreSQL as single databaseRelational model handles posts?hashtags M2M cleanly; JSONB for flexibility§311Raw payloads in PostgreSQL JSONBSimple; no extra storage system; 24-72h TTL keeps it lean§3.612REST API styleSimpler contracts; better developer handoff; strong tooling§413API key authenticationInternal service auth; simpler than OAuth; two-tier (read/admin)§8.114Redis: queue + API cacheRedis already required for BullMQ; caching is free additional benefit§9.315Modular Monolith architectureSingle deployment; strong module boundaries; ready for future extraction§2.116Repository ownership per modulePrevents cross-module table access; enforces clean ownership§2.317Module-first folder structurePath communicates ownership; aligns with modular monolith philosophy§2.418Strict DTO queue contractsWorkers receive typed, validated payloads; prevents malformed jobs§6.219Structured response envelopePredictable API contracts; consistent pagination and error format§4.120Cursor-based paginationScales with large growing datasets; no OFFSET performance cliff§4.221Query-parameter filteringAvoids endpoint explosion; composable filters§4.222URL-based API versioning (/v1)Safe API evolution; breaking changes go to /v2§4.123Centralized error handlingConsistent error responses; single place for error logging§2.424Structured logging (JSON)Machine-readable; integrates with log aggregation platforms§10.125Hybrid health monitoringLightweight /health for containers; deep /api/v1/health for diagnostics§4.726Exponential backoff, max 4 retriesSocial content is time-sensitive; infinite retries waste resources§6.327Adaptive throttlingResilient to platform behavior changes; reduces ban risk§7.428Hybrid session persistenceReuse sessions to reduce login frequency; auto-refresh on expiry§7.329Browser pool (Playwright)Reusable browser instances; lower RAM overhead; faster job startup§7.230Isolated browser context per jobSession isolation without separate browser process§7.231Hybrid trigger modelScheduler for automation; manual API for debugging§4.532Hybrid target strategySupports feed, keyword, profile collection without code changes§7.133FIFO queue orderingSimple; predictable; priority queues deferred to v2§6.134Temporary raw payload storageEnables parser retry and replay; not permanent storage§3.635Short raw payload TTL (24-72h)Prevents storage bloat; sufficient for retry window§3.6
+
+13. Known Gaps and Future Work
+13.1 Deferred to v2
+The following items were explicitly discussed and intentionally deferred. They are documented here so the next development phase has clear starting points.
+
+• Trend score computation (trendQueue) - formula, time windows, velocity calculations, and aggregation intervals are not defined. The trendQueue stub and scrape_jobs audit table lay the groundwork.
+• Priority queue ordering - FIFO is v1. High/medium/low priority tiers (trending spikes vs scheduled vs historical) can be introduced without redesigning workers.
+• Separate authors table - author data is nullable in posts for now. A dedicated authors table with follower counts and profile metadata can be introduced with a migration.
+• Historical engagement tracking - engagement_history table for trend analysis over time. The current design stores only the latest snapshot.
+• External webhook triggers - event-based scraping (new hashtag detected, threshold spike) is architecture-ready but not implemented in v1.
+
+13.2 Known Loopholes in Current Design
+The following are genuine design gaps that the implementation team should address before starting work:
+
+• Hashtag post_count denormalization risk - the post_count column on hashtags is a denormalized counter. It must be incremented/decremented atomically with INSERT/DELETE in post_hashtags, or queries will diverge from actual counts. Recommend using a database trigger or an explicit transaction in the hashtag service.
+• No rate limiting on API endpoints - there is currently no per-client rate limiting. A malicious API consumer could hammer the database. A Redis-backed rate limiter middleware should be added to collection endpoints.
+• Scraper credential rotation strategy undefined - the session manager knows how to refresh a session, but the process for rotating the actual platform credentials (password change) is not specified. This needs an ops runbook.
+• No pagination on scrape_jobs - the admin endpoint GET /api/v1/scraper/jobs should have the same cursor pagination as posts and hashtags to avoid timeout on large audit logs.
+• platforms.config JSONB schema undefined - the config column stores platform-specific settings but there is no JSON schema validating its contents. A zod schema per platform connector should validate this on write.
+• Worker crash between stages - if a worker crashes after storing a raw_payload but before enqueuing the parseQueue job, the raw_payload will expire without ever being parsed. The parse_status field on raw_payloads enables a recovery worker to find pending records whose TTL has not expired and re-enqueue them. This recovery worker is not implemented in v1 but the schema supports it.
+
+
+14. Glossary
+TermDefinitionBullMQA Redis-backed job queue library for Node.js. Manages job creation, worker assignment, retries, and dead-letter queues.Cursor PaginationA pagination strategy where the client sends the last seen record identifier (cursor) to fetch the next page, avoiding OFFSET-based performance issues.Dead Letter QueueA special queue that receives jobs after all retry attempts have been exhausted. Used for debugging and replay analysis.DTOData Transfer Object. A typed, validated object used to carry data between layers or across queue boundaries.Modular MonolithA single-process backend where internal modules are strongly bounded and communicate only through defined interfaces, without sharing database tables directly.NormalizationThe process of transforming platform-specific raw data into the universal PostDTO schema used throughout the pipeline.Raw PayloadThe unprocessed HTML or JSON output of the scraper, stored temporarily in raw_payloads before parser processing.Soft DeleteMarking a record as deleted by setting deleted_at instead of physically removing it, allowing recovery and audit.Threshold RuleA configurable engagement filter (e.g. likes >= 100000) stored in the threshold_rules table. Posts not meeting all active rules for their platform are discarded.UPSERTINSERT ... ON CONFLICT DO UPDATE. An atomic database operation that inserts a new record or updates an existing one if a uniqueness constraint is violated.
