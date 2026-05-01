@@ -1,0 +1,125 @@
+# ── What is this file? ───────────────────────────────────────────────────────
+# docker-compose is the "conductor". It tells Docker to spin up 3 containers
+# and connect them together on a private network called "sti-network".
+# Inside this network, each service is reachable by its service name
+# (e.g., the API connects to postgres at hostname "db", not "localhost").
+
+services:
+
+  # ── 1. PostgreSQL Database ─────────────────────────────────────────────────
+  db:
+    image: postgres:15-alpine          # Lightweight official Postgres image
+    container_name: sti-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: dbms
+      POSTGRES_DB: social_trend_intelligence
+    ports:
+      - "5433:5432"                    # Expose to port 5433 to avoid conflicting with Windows Postgres
+    volumes:
+      - postgres_data:/var/lib/postgresql/data  # Persist DB data even when container restarts
+    networks:
+      - sti-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+
+  # ── 2. Redis Cache & Queue Backend ────────────────────────────────────────
+  redis:
+    image: redis:7-alpine              # Tiny official Redis image
+    container_name: sti-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"                    # Expose so you can inspect queues via RedisInsight
+    volumes:
+      - redis_data:/data               # Persist queue jobs across restarts
+    networks:
+      - sti-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+
+  # ── 3. API + Scraper Backend ──────────────────────────────────────────────
+  api:
+    build:
+      context: .                       # Use the Dockerfile in this folder
+      dockerfile: Dockerfile
+    container_name: sti-api
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    env_file:
+      - .env                           # Load your .env file into the container
+    environment:
+      # Set timezone so logs match your local PC time (+05:30)
+      TZ: Asia/Kolkata
+      # IMPORTANT: Override localhost with Docker service names.
+      # Inside Docker's network, "db" and "redis" are the hostnames, not "localhost".
+      DB_HOST: db
+      DB_PORT: 5432
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      DATABASE_URL: postgresql://postgres:dbms@db:5432/social_trend_intelligence
+      # Playwright needs this to run Chromium in a containerized environment
+      PLAYWRIGHT_BROWSERS_PATH: /ms-playwright
+    volumes:
+      # Mount your local session-store INTO the container.
+      # This means the cookies you saved (instagram_cookies.json, linkedin_state.json)
+      # will be available to the scraper running inside Docker!
+      - ./session-store:/app/session-store
+    depends_on:
+      db:
+        condition: service_healthy     # Wait for postgres to be ready before starting API
+      redis:
+        condition: service_healthy     # Wait for redis to be ready before starting API
+      db-setup:
+        condition: service_completed_successfully # Wait for migrations to finish
+    networks:
+      - sti-network
+
+
+  # ── 4. One-time DB Setup (runs migrate + seed then exits) ─────────────────
+  # This is a "job" container — it runs once, sets up the DB, then exits.
+  # Docker Compose will not restart it (restart: "no").
+  db-setup:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: sti-db-setup
+    restart: "no"                      # Run once and exit
+    env_file:
+      - .env
+    environment:
+      DB_HOST: db
+      DATABASE_URL: postgresql://postgres:dbms@db:5432/social_trend_intelligence
+    # Run migrate first, then seed
+    command: sh -c "node dist/database/migrate.js && node dist/database/seed.js"
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - sti-network
+
+
+# ── Named Volumes ─────────────────────────────────────────────────────────────
+# Docker manages these — data persists even if containers are deleted
+volumes:
+  postgres_data:
+    name: sti-postgres-data
+  redis_data:
+    name: sti-redis-data
+
+
+# ── Private Network ───────────────────────────────────────────────────────────
+# All containers talk to each other over this isolated network
+networks:
+  sti-network:
+    name: sti-network
+    driver: bridge

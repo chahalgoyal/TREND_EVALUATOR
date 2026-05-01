@@ -1,0 +1,38 @@
+# Dependencies — Linux needs different binaries than Windows
+# Docker will run npm install fresh inside the container
+node_modules
+
+# Compiled output — Docker will rebuild this with tsc
+dist
+
+# TypeScript source — in runner stage we only need compiled JS
+# (builder stage handles this via multi-stage copy)
+
+# Environment files — injected by docker-compose at runtime
+.env
+.env.local
+
+# Session cookies — mounted as a volume at runtime
+session-store
+
+# Git files — not needed in container
+.git
+.gitignore
+
+# Debug HTML captures
+ig_html_*.html
+*.json
+!package.json
+!package-lock.json
+!tsconfig.json
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# VS Code
+.vscode
