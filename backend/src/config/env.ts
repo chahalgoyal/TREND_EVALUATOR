@@ -30,6 +30,9 @@ const envSchema = z.object({
   LINKEDIN_USERNAME: z.string(),
   LINKEDIN_PASSWORD: z.string(),
 
+  // YouTube
+  YOUTUBE_API_KEY: z.string().min(10),
+
   // Scraper
   BROWSER_POOL_SIZE: z.string().default('2'),
   SESSION_STORE_PATH: z.string().default('./session-store'),
@@ -82,6 +85,10 @@ export const env = {
   linkedin: {
     username: parsed.data.LINKEDIN_USERNAME,
     password: parsed.data.LINKEDIN_PASSWORD,
+  },
+
+  youtube: {
+    apiKey: parsed.data.YOUTUBE_API_KEY,
   },
 
   scraper: {

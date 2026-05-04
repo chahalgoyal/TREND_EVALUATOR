@@ -6,8 +6,15 @@ import { BrowserContext, Page } from 'playwright';
  * and output normalization behind a common contract.
  */
 export interface PlatformConnector {
-  /** Platform slug — 'instagram' | 'linkedin' */
+  /** Platform slug — 'instagram' | 'linkedin' | 'youtube' */
   readonly platform: string;
+
+  /**
+   * Whether this connector needs a Playwright browser.
+   * API-based connectors (e.g. YouTube) set this to false to skip browser acquisition.
+   * Defaults to true if not specified.
+   */
+  readonly requiresBrowser?: boolean;
 
   /**
    * Login to the platform. Returns true if login succeeded.

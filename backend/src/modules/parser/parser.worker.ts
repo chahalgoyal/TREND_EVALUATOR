@@ -65,6 +65,11 @@ async function processParseJob(job: Job<ParseJobDTO>): Promise<void> {
     if (urnMatch) {
       normalizedPost.platformPostId = urnMatch[1];
     }
+    
+    // YouTube: API JSON id
+    if (data.platform === 'youtube' && rawPayload.payload_json && (rawPayload.payload_json as any).videoId) {
+      normalizedPost.platformPostId = (rawPayload.payload_json as any).videoId;
+    }
 
     // Update raw payload status
     await rawStorageRepository.updateStatus(data.rawPayloadId, 'success');

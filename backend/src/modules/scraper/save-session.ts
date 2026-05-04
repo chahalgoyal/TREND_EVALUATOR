@@ -27,13 +27,23 @@ const PLATFORMS: Record<string, { loginUrl: string; feedUrl: string }> = {
     loginUrl: 'https://www.linkedin.com/login',
     feedUrl: 'https://www.linkedin.com/feed/',
   },
+  youtube: {
+    loginUrl: 'api-based',
+    feedUrl: 'api-based',
+  }
 };
 
 async function saveSession() {
   const platform = process.argv[2]?.toLowerCase();
   if (!platform || !PLATFORMS[platform]) {
-    console.error('Usage: npx tsx src/modules/scraper/save-session.ts <instagram|linkedin>');
+    console.error('Usage: npx tsx src/modules/scraper/save-session.ts <instagram|linkedin|youtube>');
     process.exit(1);
+  }
+
+  if (platform === 'youtube') {
+    console.log('✅ YouTube uses the Data API v3. No manual browser login is required!');
+    console.log('   Make sure YOUTUBE_API_KEY is set in your .env file.');
+    process.exit(0);
   }
 
   const config = PLATFORMS[platform];

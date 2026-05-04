@@ -12,7 +12,8 @@
     "setup": "tsx src/database/setup.ts",
     "demo": "tsx src/database/demo-pipeline.ts",
     "save-session:instagram": "tsx src/modules/scraper/save-session.ts instagram",
-    "save-session:linkedin": "tsx src/modules/scraper/save-session.ts linkedin"
+    "save-session:linkedin": "tsx src/modules/scraper/save-session.ts linkedin",
+    "save-session:youtube": "tsx src/modules/scraper/save-session.ts youtube"
   },
   "keywords": [],
   "author": "",

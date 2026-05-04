@@ -3,7 +3,9 @@ import redis from '../../config/redis';
 import { db } from '../../config/database';
 import { env } from '../../config/env';
 import { logger } from '../../shared/logger';
-import { ThresholdJobDTO, NormalizedPostDTO } from '../../queues/dto';
+import { ThresholdJobDTO, NormalizedPostDTO, IntelligenceJobDTO } from '../../queues/dto';
+import { intelligenceQueue } from '../../queues/intelligence.queue';
+import { v4 as uuidv4 } from 'uuid';
 
 /**
  * Threshold Worker — evaluates posts against engagement rules.
@@ -144,6 +146,27 @@ async function processThresholdJob(job: Job<ThresholdJobDTO>): Promise<void> {
       hashtags: post.hashtags.length,
       likes: post.likes,
     }, 'Post persisted');
+
+    // ── Dispatch to Intelligence Layer ──
+    if (thresholdPassed) {
+      const intelJob: IntelligenceJobDTO = {
+        jobId: uuidv4(),
+        jobType: 'EVALUATE_TREND',
+        platform: data.platform,
+        schemaVersion: 'v1',
+        metadata: data.metadata,
+        createdAt: new Date().toISOString(),
+        postDbId: postDbId,
+        platformPostId: post.platformPostId,
+        likes: post.likes,
+        comments: post.comments,
+        views: post.views,
+        postedAt: post.postedAt,
+        hashtags: post.hashtags
+      };
+      await intelligenceQueue.add(intelJob.jobType, intelJob, { jobId: intelJob.jobId });
+      jobLogger.info('Dispatched to intelligenceQueue');
+    }
 
   } catch (err) {
     await client.query('ROLLBACK');

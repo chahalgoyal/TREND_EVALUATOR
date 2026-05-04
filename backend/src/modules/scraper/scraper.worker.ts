@@ -11,26 +11,29 @@ import { sessionManager } from './session-manager/session';
 import { rawStorageRepository } from './raw-storage/rawStorage.repository';
 import { InstagramConnector } from './connectors/instagram/connector';
 import { LinkedInConnector } from './connectors/linkedin/connector';
+import { YouTubeConnector } from './connectors/youtube/connector';
 import { PlatformConnector, RawPostFragment } from './connectors/interface';
 
 // ── Platform connector registry ──────────────────────────────────────────────
 const connectors: Record<string, PlatformConnector> = {
   instagram: new InstagramConnector(),
   linkedin: new LinkedInConnector(),
+  youtube: new YouTubeConnector(),
 };
 
 /**
  * Scraper Worker — processes scrapeQueue jobs.
  * 
  * Flow per job (SRS §2.2):
- * 1. Borrow browser from pool
- * 2. Create isolated context with saved session
- * 3. Login if needed
- * 4. Scrape posts (feed/keyword/profile)
- * 5. Store each post in raw_payloads
- * 6. Push one parseQueue job per post
- * 7. Update scrape_jobs audit log
- * 8. Return browser to pool
+ * 1. Check if connector requires a browser (API-based connectors skip this)
+ * 2. Borrow browser from pool (if needed)
+ * 3. Create isolated context with saved session
+ * 4. Login if needed
+ * 5. Scrape posts (feed/keyword/profile)
+ * 6. Store each post in raw_payloads
+ * 7. Push one parseQueue job per post
+ * 8. Update scrape_jobs audit log
+ * 9. Return browser to pool
  */
 async function processScrapeJob(job: Job<ScrapeJobDTO>): Promise<void> {
   const data = job.data;
@@ -57,9 +60,53 @@ async function processScrapeJob(job: Job<ScrapeJobDTO>): Promise<void> {
   const platformId = platformResult.rows[0]?.id;
   if (!platformId) throw new Error(`Platform not found in DB: ${data.platform}`);
 
-  // Acquire browser
-  const browser = await browserPool.acquire();
   let postsScraped = 0;
+
+  // ── API-based connectors (e.g. YouTube) — no browser needed ────────────
+  if (connector.requiresBrowser === false) {
+    try {
+      jobLogger.info('API-based connector — skipping browser acquisition');
+
+      let fragments: RawPostFragment[] = [];
+      // Pass null context — API connectors don't use it
+      const nullContext = null as any;
+
+      switch (data.targetType) {
+        case 'feed':
+          fragments = await connector.scrapeFeed(nullContext);
+          break;
+        case 'keyword':
+          fragments = await connector.scrapeKeyword(nullContext, data.targetValue!);
+          break;
+        case 'profile':
+          fragments = await connector.scrapeProfile(nullContext, data.targetValue!);
+          break;
+      }
+
+      jobLogger.info({ fragmentCount: fragments.length }, 'API scraping complete, storing raw payloads');
+
+      postsScraped = await storeAndEnqueueFragments(fragments, platformId, data, jobLogger);
+
+      // Update audit log — success
+      await db.query(
+        `UPDATE scrape_jobs SET status = 'completed', posts_scraped = $2, completed_at = NOW() WHERE id = $1`,
+        [data.scrapeJobDbId, postsScraped]
+      );
+
+      jobLogger.info({ postsScraped }, 'Scrape job completed');
+      return;
+    } catch (err: any) {
+      jobLogger.error({ err: err.message }, 'Scrape job failed');
+      await db.query(
+        `UPDATE scrape_jobs SET status = 'failed', error_message = $2, completed_at = NOW(), posts_scraped = $3 WHERE id = $1`,
+        [data.scrapeJobDbId, err.message, postsScraped]
+      );
+      throw err;
+    }
+  }
+
+  // ── Browser-based connectors (Instagram, LinkedIn) ─────────────────────
+  const browser = await browserPool.acquire();
 
   try {
     // Try to load saved browser state (from save-session.ts manual login)
@@ -121,39 +168,7 @@ async function processScrapeJob(job: Job<ScrapeJobDTO>): Promise<void> {
         jobLogger.error('🚨 WARNING: Selectors or API interception might be broken - 0 posts extracted!');
       }
 
-      // Store each fragment and enqueue to parseQueue
-      for (const fragment of fragments) {
-        try {
-          // Store raw payload
-          const rawPayloadId = await rawStorageRepository.store(fragment, platformId, data.jobId);
-
-          // Determine payload type
-          const payloadType = fragment.postJson ? 'api_json' : 'html';
-          const jobType = payloadType === 'api_json' ? 'PARSE_POST_API' : 'PARSE_POST_HTML';
-
-          // Build ParseJobDTO
-          const parseJob: ParseJobDTO = {
-            jobId: uuidv4(),
-            jobType,
-            platform: data.platform,
-            schemaVersion: 'v1',
-            metadata: {
-              trigger: data.metadata.trigger,
-              attempt: 1,
-              initiatedBy: data.metadata.initiatedBy,
-            },
-            createdAt: new Date().toISOString(),
-            rawPayloadId,
-            payloadType: payloadType as 'html' | 'api_json' | 'graphql',
-            sourceType: fragment.source,
-          };
-
-          await parseQueue.add(parseJob.jobType, parseJob, { jobId: parseJob.jobId });
-          postsScraped++;
-        } catch (err) {
-          jobLogger.error({ err, postId: fragment.postId }, 'Failed to store/enqueue fragment');
-        }
-      }
+      postsScraped = await storeAndEnqueueFragments(fragments, platformId, data, jobLogger);
 
       // Update audit log — success
       await db.query(
@@ -178,6 +193,54 @@ async function processScrapeJob(job: Job<ScrapeJobDTO>): Promise<void> {
   } finally {
     browserPool.release(browser);
   }
+}
+
+/**
+ * Store raw fragments and enqueue parse jobs.
+ * Shared by both browser-based and API-based connector flows.
+ */
+async function storeAndEnqueueFragments(
+  fragments: RawPostFragment[],
+  platformId: number,
+  data: ScrapeJobDTO,
+  jobLogger: any,
+): Promise<number> {
+  let postsScraped = 0;
+
+  for (const fragment of fragments) {
+    try {
+      // Store raw payload
+      const rawPayloadId = await rawStorageRepository.store(fragment, platformId, data.jobId);
+
+      // Determine payload type
+      const payloadType = fragment.postJson ? 'api_json' : 'html';
+      const jobType = payloadType === 'api_json' ? 'PARSE_POST_API' : 'PARSE_POST_HTML';
+
+      // Build ParseJobDTO
+      const parseJob: ParseJobDTO = {
+        jobId: uuidv4(),
+        jobType,
+        platform: data.platform,
+        schemaVersion: 'v1',
+        metadata: {
+          trigger: data.metadata.trigger,
+          attempt: 1,
+          initiatedBy: data.metadata.initiatedBy,
+        },
+        createdAt: new Date().toISOString(),
+        rawPayloadId,
+        payloadType: payloadType as 'html' | 'api_json' | 'graphql',
+        sourceType: fragment.source,
+      };
+
+      await parseQueue.add(parseJob.jobType, parseJob, { jobId: parseJob.jobId });
+      postsScraped++;
+    } catch (err) {
+      jobLogger.error({ err, postId: fragment.postId }, 'Failed to store/enqueue fragment');
+    }
+  }
+
+  return postsScraped;
 }
 
 // ── Create and export the worker ─────────────────────────────────────────────

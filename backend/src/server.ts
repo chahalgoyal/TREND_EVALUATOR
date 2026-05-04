@@ -8,13 +8,15 @@ import { logger } from './shared/logger';
 import './queues/scrape.queue';
 import './queues/parse.queue';
 import './queues/threshold.queue';
-import './queues/trend.queue';
+import './queues/intelligence.queue';
 
 // Workers
 import { startScrapeWorker } from './modules/scraper/scraper.worker';
 import { startParseWorker } from './modules/parser/parser.worker';
 import { startThresholdWorker } from './modules/threshold/threshold.worker';
+import { startIntelligenceWorker } from './modules/intelligence/intelligence.worker';
 import { startScheduler } from './modules/scraper/triggers/scheduler';
+import { startTrendRecalculator } from './modules/intelligence/recalculator';
 import { browserPool } from './modules/scraper/browser-pool/pool';
 
 async function bootstrap() {
@@ -48,12 +50,14 @@ async function bootstrap() {
   startScrapeWorker();
   startParseWorker();
   startThresholdWorker();
+  startIntelligenceWorker();
   logger.info('✅ All queue workers started');
 
   // Start scheduler (only in non-test environments)
   if (env.nodeEnv !== 'test') {
     startScheduler();
-    logger.info('✅ Scheduler started');
+    startTrendRecalculator();
+    logger.info('✅ Schedulers started');
   }
 
   // Start HTTP server

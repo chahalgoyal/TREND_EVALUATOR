@@ -233,6 +233,25 @@ export function normalizePost(params: {
   let authorId: string | undefined;
   let authorUsername: string | undefined;
 
+  // Strategy 0: YouTube Data API v3 JSON payload
+  if (platform === 'youtube' && json && !json.interceptedApis) {
+    caption = (json.title || '') + (json.description ? `\n\n${json.description}` : '');
+    caption = caption.slice(0, 5000);
+    likes = parseInt(json.statistics?.likeCount || '0', 10);
+    comments = parseInt(json.statistics?.commentCount || '0', 10);
+    views = parseInt(json.statistics?.viewCount || '0', 10);
+    authorId = json.channelId;
+    authorUsername = json.channelTitle;
+    
+    // YouTube specific hashtags can also come from tags array
+    if (json.tags && Array.isArray(json.tags)) {
+      json.tags.forEach((t: string) => {
+        const clean = t.replace(/\s+/g, '').toLowerCase();
+        if (clean) caption += ` #${clean}`; // append to caption so extractHashtags picks it up
+      });
+    }
+  }
+
   // Strategy 1: API/GraphQL JSON — extract full caption, engagement, and author
   if (json?.interceptedApis && Array.isArray(json.interceptedApis)) {
     const apiData = extractFromInterceptedApis(json.interceptedApis, platformPostId, platform);
