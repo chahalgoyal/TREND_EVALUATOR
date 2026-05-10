@@ -198,9 +198,9 @@ export class InstagramConnector implements PlatformConnector {
         } catch { continue; }
       }
 
-      // Also check URL — if we're on the feed, we're logged in
+      // Also check URL — if we're on the feed or explore, we're logged in
       const url = page.url();
-      if (url === 'https://www.instagram.com/' || url.startsWith('https://www.instagram.com/?')) {
+      if (url === 'https://www.instagram.com/' || url.startsWith('https://www.instagram.com/?') || url.includes('/explore/')) {
         // Check that we're not on the login page
         const loginForm = page.locator('input[name="username"]').first();
         try {
@@ -242,20 +242,13 @@ export class InstagramConnector implements PlatformConnector {
     });
 
     try {
-      logger.info({ maxPosts: max }, 'Instagram: Scraping feed');
-      await page.goto('https://www.instagram.com/', { waitUntil: 'domcontentloaded', timeout: 30000 });
+      logger.info({ maxPosts: max }, 'Instagram: Scraping Explore page');
+      await page.goto('https://www.instagram.com/explore/', { waitUntil: 'domcontentloaded', timeout: 30000 });
       await page.waitForTimeout(cfg.scraping.postLoadWait);
 
       for (let scroll = 0; scroll < cfg.scraping.maxScrolls && fragments.length < max; scroll++) {
-        // Expand truncated captions — click all "more" buttons so full text (with hashtags) is in the DOM
-        try {
-          const moreButtons = page.locator('span[role="link"]:has-text("more"), button:has-text("more")');
-          const count = await moreButtons.count();
-          for (let i = 0; i < count; i++) {
-            try { await moreButtons.nth(i).click({ timeout: 500 }); } catch { /* already expanded */ }
-          }
-          if (count > 0) await page.waitForTimeout(300);
-        } catch { /* no more buttons found */ }
+        // Explore page uses a grid of thumbnails, so there are no "more" buttons to click.
+        // We rely on the intercepted GraphQL/API responses to provide the full caption and engagement data.
 
         // Find all post links
         const postLinks = await page.$$eval('a[href*="/p/"], a[href*="/reel/"]', (links) =>
@@ -270,23 +263,17 @@ export class InstagramConnector implements PlatformConnector {
           if (seenPostIds.has(link.postId) || fragments.length >= max) continue;
           seenPostIds.add(link.postId);
 
-          // Try to extract the containing article
+          // For Explore grid, the item is usually just an <a> wrapped in a <div>
           let articleHtml = '';
           try {
+            // Try to grab the parent container for more context if possible
             articleHtml = await page.$eval(
-              `article:has(a[href*="${link.postId}"])`,
+              `div:has(> a[href*="${link.postId}"])`,
               (el) => el.outerHTML
             );
           } catch {
-            // Fallback — try a broader selector
-            try {
-              articleHtml = await page.$eval(
-                `div:has(> a[href*="${link.postId}"])`,
-                (el) => el.outerHTML
-              );
-            } catch {
-              articleHtml = `<a href="${link.href}" data-post-id="${link.postId}"></a>`;
-            }
+            // Fallback — just use the anchor
+            articleHtml = `<a href="${link.href}" data-post-id="${link.postId}"></a>`;
           }
 
           fragments.push({

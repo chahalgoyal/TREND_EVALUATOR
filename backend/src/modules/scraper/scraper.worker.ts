@@ -68,18 +68,18 @@ async function processScrapeJob(job: Job<ScrapeJobDTO>): Promise<void> {
       jobLogger.info('API-based connector — skipping browser acquisition');
 
       let fragments: RawPostFragment[] = [];
-      // Pass null context — API connectors don't use it
-      const nullContext = null as any;
+      // Pass sessionData (which may contain API keys) as the "context"
+      const apiContext = data.sessionData as any;
 
       switch (data.targetType) {
         case 'feed':
-          fragments = await connector.scrapeFeed(nullContext);
+          fragments = await connector.scrapeFeed(apiContext);
           break;
         case 'keyword':
-          fragments = await connector.scrapeKeyword(nullContext, data.targetValue!);
+          fragments = await connector.scrapeKeyword(apiContext, data.targetValue!);
           break;
         case 'profile':
-          fragments = await connector.scrapeProfile(nullContext, data.targetValue!);
+          fragments = await connector.scrapeProfile(apiContext, data.targetValue!);
           break;
       }
 
@@ -109,30 +109,48 @@ async function processScrapeJob(job: Job<ScrapeJobDTO>): Promise<void> {
   const browser = await browserPool.acquire();
 
   try {
-    // Try to load saved browser state (from save-session.ts manual login)
-    const { existsSync, readFileSync } = await import('fs');
-    const statePath = `session-store/${data.platform}_state.json`;
     let context;
 
-    if (existsSync(statePath)) {
+    // ── Priority 1: Use DB-sourced session from round-robin scheduler ───
+    if (data.sessionData) {
       try {
-        const stateData = JSON.parse(readFileSync(statePath, 'utf-8'));
         context = await browser.newContext({
-          storageState: stateData,
+          storageState: data.sessionData as any,
           userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
           viewport: { width: 1280, height: 720 },
           locale: 'en-US',
         });
-        jobLogger.info('Loaded saved browser state from save-session.ts');
+        jobLogger.info({ accountId: data.accountId }, 'Using DB session (round-robin account)');
       } catch (err) {
-        jobLogger.warn({ err }, 'Failed to load saved state, falling back to cookies');
+        jobLogger.warn({ err }, 'Failed to load DB session data, falling back to filesystem');
+        context = undefined; // Will trigger filesystem fallback below
+      }
+    }
+
+    // ── Priority 2: Filesystem session fallback ─────────────────────────
+    if (!context) {
+      const { existsSync, readFileSync } = await import('fs');
+      const statePath = `session-store/${data.platform}_state.json`;
+
+      if (existsSync(statePath)) {
+        try {
+          const stateData = JSON.parse(readFileSync(statePath, 'utf-8'));
+          context = await browser.newContext({
+            storageState: stateData,
+            userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            viewport: { width: 1280, height: 720 },
+            locale: 'en-US',
+          });
+          jobLogger.info('Loaded saved browser state from filesystem');
+        } catch (err) {
+          jobLogger.warn({ err }, 'Failed to load saved state, falling back to cookies');
+          const savedCookies = sessionManager.loadCookies(data.platform);
+          context = await browserPool.createContext(browser, savedCookies ?? undefined);
+        }
+      } else {
         const savedCookies = sessionManager.loadCookies(data.platform);
         context = await browserPool.createContext(browser, savedCookies ?? undefined);
       }
-    } else {
-      // Fallback: session manager cookies
-      const savedCookies = sessionManager.loadCookies(data.platform);
-      context = await browserPool.createContext(browser, savedCookies ?? undefined);
     }
 
     try {
@@ -141,11 +159,42 @@ async function processScrapeJob(job: Job<ScrapeJobDTO>): Promise<void> {
       if (!loggedIn) {
         // Invalidate session and fail
         sessionManager.invalidate(data.platform);
+        // If using DB account, handle failure count
+        if (data.accountId) {
+          await db.query(`
+            UPDATE platform_accounts 
+            SET consecutive_failures = consecutive_failures + 1,
+                last_failure_reason = $2,
+                retry_after = NOW() + INTERVAL '1 hour',
+                is_active = CASE WHEN consecutive_failures + 1 >= 3 THEN false ELSE is_active END,
+                updated_at = NOW()
+            WHERE id = $1
+          `, [data.accountId, 'login_failed']);
+          jobLogger.warn({ accountId: data.accountId }, 'DB account failed login, failure count updated');
+        }
         throw new Error(`Login failed for ${data.platform}`);
       }
 
-      // Save successful session
+      // Save successful session to filesystem
       await sessionManager.saveCookies(data.platform, context);
+
+      // Persist refreshed cookies back to DB if using a round-robin account
+      if (data.accountId) {
+        try {
+          const storageState = await context.storageState();
+          await db.query(`
+            UPDATE platform_accounts 
+            SET session_data = $1, 
+                consecutive_failures = 0, 
+                retry_after = NULL, 
+                updated_at = NOW() 
+            WHERE id = $2
+          `, [JSON.stringify(storageState), data.accountId]);
+          jobLogger.info({ accountId: data.accountId }, 'Refreshed session saved back to DB and failure count reset');
+        } catch (err) {
+          jobLogger.warn({ err }, 'Failed to persist refreshed session to DB');
+        }
+      }
 
       // Scrape based on target type
       let fragments: RawPostFragment[] = [];
@@ -231,6 +280,7 @@ async function storeAndEnqueueFragments(
         rawPayloadId,
         payloadType: payloadType as 'html' | 'api_json' | 'graphql',
         sourceType: fragment.source,
+        scrapeJobDbId: data.scrapeJobDbId,
       };
 
       await parseQueue.add(parseJob.jobType, parseJob, { jobId: parseJob.jobId });

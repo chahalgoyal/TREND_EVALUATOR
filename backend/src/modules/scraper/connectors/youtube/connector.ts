@@ -39,9 +39,11 @@ export class YouTubeConnector implements PlatformConnector {
 
     try {
       // Step 1: Search for popular/trending short videos
+      const apiKey = (_context as any)?.apiKey;
       const searchResults = await this.searchShorts({
         q: '#shorts', // Using #shorts as query since search.list needs a query
         maxResults: max,
+        apiKey
       });
 
       if (searchResults.length === 0) {
@@ -51,7 +53,7 @@ export class YouTubeConnector implements PlatformConnector {
 
       // Step 2: Enrich with full statistics
       const videoIds = searchResults.map((r) => r.videoId);
-      const enriched = await this.getVideoDetails(videoIds);
+      const enriched = await this.getVideoDetails(videoIds, apiKey);
 
       // Step 3: Build RawPostFragments
       const fragments = this.buildFragments(enriched, 'feed');
@@ -70,9 +72,11 @@ export class YouTubeConnector implements PlatformConnector {
     logger.info({ keyword, maxPosts: max }, 'YouTube: Searching Shorts by keyword');
 
     try {
+      const apiKey = (_context as any)?.apiKey;
       const searchResults = await this.searchShorts({
         q: keyword,
         maxResults: max,
+        apiKey
       });
 
       if (searchResults.length === 0) {
@@ -81,7 +85,7 @@ export class YouTubeConnector implements PlatformConnector {
       }
 
       const videoIds = searchResults.map((r) => r.videoId);
-      const enriched = await this.getVideoDetails(videoIds);
+      const enriched = await this.getVideoDetails(videoIds, apiKey);
       const fragments = this.buildFragments(enriched, 'keyword');
 
       logger.info({ keyword, postsScraped: fragments.length }, 'YouTube: Keyword scrape complete');
@@ -98,9 +102,11 @@ export class YouTubeConnector implements PlatformConnector {
     logger.info({ channelId, maxPosts: max }, 'YouTube: Fetching Shorts from channel');
 
     try {
+      const apiKey = (_context as any)?.apiKey;
       const searchResults = await this.searchShorts({
         channelId,
         maxResults: max,
+        apiKey
       });
 
       if (searchResults.length === 0) {
@@ -109,7 +115,7 @@ export class YouTubeConnector implements PlatformConnector {
       }
 
       const videoIds = searchResults.map((r) => r.videoId);
-      const enriched = await this.getVideoDetails(videoIds);
+      const enriched = await this.getVideoDetails(videoIds, apiKey);
       const fragments = this.buildFragments(enriched, 'profile');
 
       logger.info({ channelId, postsScraped: fragments.length }, 'YouTube: Profile scrape complete');
@@ -131,9 +137,11 @@ export class YouTubeConnector implements PlatformConnector {
     channelId?: string;
     chart?: string;
     maxResults: number;
+    apiKey?: string;
   }): Promise<Array<{ videoId: string; title: string; channelId: string; channelTitle: string }>> {
     const url = new URL(`${cfg.api.baseUrl}${cfg.api.endpoints.search}`);
-    url.searchParams.set('key', env.youtube.apiKey);
+    const apiKey = params.apiKey || env.youtube.apiKey;
+    url.searchParams.set('key', apiKey);
     url.searchParams.set('part', 'snippet');
     url.searchParams.set('type', cfg.shorts.type);
     url.searchParams.set('videoDuration', cfg.shorts.videoDuration);
@@ -147,7 +155,19 @@ export class YouTubeConnector implements PlatformConnector {
 
     logger.debug({ url: url.toString() }, 'YouTube API: search.list');
 
-    const response = await fetch(url.toString());
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 15000); // 15 second timeout
+
+    let response: Response;
+    try {
+      response = await fetch(url.toString(), { signal: controller.signal });
+    } catch (err: any) {
+      logger.error({ err: err.message }, 'YouTube API: search.list fetch timed out or failed');
+      throw new Error(`YouTube search API error: fetch failed (${err.message})`);
+    } finally {
+      clearTimeout(timeout);
+    }
+
     if (!response.ok) {
       const errorBody = await response.text();
       logger.error({ status: response.status, body: errorBody }, 'YouTube API: search.list failed');
@@ -172,21 +192,34 @@ export class YouTubeConnector implements PlatformConnector {
    * Cost: 1 quota unit per call (regardless of how many video IDs).
    * Max 50 video IDs per call.
    */
-  private async getVideoDetails(videoIds: string[]): Promise<any[]> {
+  private async getVideoDetails(videoIds: string[], apiKeyOverride?: string): Promise<any[]> {
     if (videoIds.length === 0) return [];
+    const apiKey = apiKeyOverride || env.youtube.apiKey;
 
     // Batch into chunks of 50 (API limit)
     const results: any[] = [];
     for (let i = 0; i < videoIds.length; i += 50) {
       const batch = videoIds.slice(i, i + 50);
       const url = new URL(`${cfg.api.baseUrl}${cfg.api.endpoints.videos}`);
-      url.searchParams.set('key', env.youtube.apiKey);
+      url.searchParams.set('key', apiKey);
       url.searchParams.set('part', 'snippet,statistics,contentDetails');
       url.searchParams.set('id', batch.join(','));
 
       logger.debug({ videoCount: batch.length }, 'YouTube API: videos.list');
 
-      const response = await fetch(url.toString());
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 15000); // 15 second timeout
+
+      let response: Response;
+      try {
+        response = await fetch(url.toString(), { signal: controller.signal });
+      } catch (err: any) {
+        logger.error({ err: err.message }, 'YouTube API: videos.list fetch timed out or failed');
+        continue; // Skip this batch, don't fail entire scrape
+      } finally {
+        clearTimeout(timeout);
+      }
+
       if (!response.ok) {
         const errorBody = await response.text();
         logger.error({ status: response.status, body: errorBody }, 'YouTube API: videos.list failed');

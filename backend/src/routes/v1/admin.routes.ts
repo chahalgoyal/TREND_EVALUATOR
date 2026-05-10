@@ -8,11 +8,23 @@ import {
   createPlatform,
   updatePlatform,
 } from '../../modules/threshold/threshold.controller';
+import {
+  getSystemStats,
+  getAccounts,
+  createAccount
+} from '../../modules/admin/admin.controller';
 
 const router = Router();
 
 // All admin routes require admin key
 router.use(requireApiKey, requireAdmin);
+
+// Dashboard Stats
+router.get('/stats', getSystemStats);
+
+// Multi-Account Session Management
+router.get('/accounts', getAccounts);
+router.post('/accounts', createAccount);
 
 // Threshold rules CRUD
 router.get('/threshold-rules', getThresholdRules);

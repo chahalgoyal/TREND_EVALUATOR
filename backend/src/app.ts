@@ -8,6 +8,7 @@ import hashtagsRoutes from './routes/v1/hashtags.routes';
 import platformsRoutes from './routes/v1/platforms.routes';
 import scraperRoutes  from './routes/v1/scraper.routes';
 import adminRoutes    from './routes/v1/admin.routes';
+import trendsRoutes   from './routes/v1/trends.routes';
 
 const app = express();
 
@@ -25,6 +26,7 @@ app.use('/api/v1/hashtags',  hashtagsRoutes);
 app.use('/api/v1/platforms', platformsRoutes);
 app.use('/api/v1/scraper',   scraperRoutes);
 app.use('/api/v1/admin',     adminRoutes);
+app.use('/api/v1/trends',    trendsRoutes);
 
 // ── 404 handler ───────────────────────────────────────────────────────────────
 app.use((_req, res) => {
