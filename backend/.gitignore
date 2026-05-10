@@ -1,5 +1,27 @@
+# Dependencies
 node_modules/
 dist/
+
+# Env & Sessions
 .env
 session-store/
+
+# Logs & Tests
 *.log
+playwright-report/
+test-results/
+coverage/
+
+# IDE & OS
+.vscode/
+.idea/
+.DS_Store
+
+# Analysis & Temp Scripts
+*.md
+!README.md
+*.js
+!src/**/*.js
+inject-*.js
+add-*.js
+tests/

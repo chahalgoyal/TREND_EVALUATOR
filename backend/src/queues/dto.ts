@@ -9,6 +9,7 @@ export interface BaseJobDTO {
     trigger: 'scheduler' | 'manual' | 'event';
     attempt: number;
     initiatedBy: string;    // 'system' | admin ref
+    jitterMs?: number;      // Optional random delay for scheduler jobs
   };
   createdAt: string;        // ISO 8601 UTC
 }
@@ -19,6 +20,8 @@ export interface ScrapeJobDTO extends BaseJobDTO {
   targetType: 'feed' | 'keyword' | 'profile';
   targetValue?: string;     // keyword string or profileId; undefined for feed
   scrapeJobDbId: string;    // UUID → scrape_jobs.id (audit log)
+  accountId?: string;       // UUID → platform_accounts.id (round-robin selected)
+  sessionData?: object;     // JSONB session/cookies from platform_accounts
 }
 
 // ── parseQueue ───────────────────────────────────────────────────────────────
@@ -27,6 +30,7 @@ export interface ParseJobDTO extends BaseJobDTO {
   rawPayloadId: string;     // UUID → raw_payloads.id
   payloadType: 'html' | 'api_json' | 'graphql';
   sourceType: 'feed' | 'keyword' | 'profile';
+  scrapeJobDbId?: string;   // Optional UUID → scrape_jobs.id
 }
 
 // ── thresholdQueue ───────────────────────────────────────────────────────────
@@ -64,5 +68,6 @@ export interface IntelligenceJobDTO extends BaseJobDTO {
   comments: number;
   views: number;
   postedAt?: string;      // Used for time-decay gravity
+  scrapedAt: string;     // ISO 8601 UTC (Used for accurate date_bucket aggregation)
   hashtags: string[];
 }

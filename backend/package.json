@@ -13,7 +13,10 @@
     "demo": "tsx src/database/demo-pipeline.ts",
     "save-session:instagram": "tsx src/modules/scraper/save-session.ts instagram",
     "save-session:linkedin": "tsx src/modules/scraper/save-session.ts linkedin",
-    "save-session:youtube": "tsx src/modules/scraper/save-session.ts youtube"
+    "save-session:youtube": "tsx src/modules/scraper/save-session.ts youtube",
+    "test": "vitest run --reporter=verbose",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage"
   },
   "keywords": [],
   "author": "",
@@ -36,8 +39,18 @@
     "@types/node": "^25.6.0",
     "@types/node-cron": "^3.0.11",
     "@types/pg": "^8.20.0",
+    "@types/supertest": "^7.2.0",
     "@types/uuid": "^10.0.0",
+    "@vitest/coverage-v8": "^4.1.5",
+    "supertest": "^7.2.2",
     "tsx": "^4.21.0",
-    "typescript": "^6.0.3"
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.5"
+  },
+  "vitest": {
+    "include": ["tests/**/*.test.ts"],
+    "environment": "node",
+    "globals": true,
+    "testTimeout": 10000
   }
 }

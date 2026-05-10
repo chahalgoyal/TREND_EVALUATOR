@@ -98,6 +98,7 @@ services:
       - .env
     environment:
       DB_HOST: db
+      DB_PORT: 5432
       DATABASE_URL: postgresql://postgres:dbms@db:5432/social_trend_intelligence
     # Run migrate first, then seed
     command: sh -c "node dist/database/migrate.js && node dist/database/seed.js"

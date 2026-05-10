@@ -114,27 +114,34 @@ async function processThresholdJob(job: Job<ThresholdJobDTO>): Promise<void> {
 
     // UPSERT hashtags + post_hashtags (always, since post_hashtags uses ON CONFLICT DO NOTHING)
     if (post.hashtags.length > 0) {
-      for (const tag of post.hashtags) {
-        // Upsert hashtag
-        const hashtagResult = await client.query(
-          `INSERT INTO hashtags (tag, post_count, first_seen_at, last_seen_at)
-           VALUES ($1, 1, NOW(), NOW())
-           ON CONFLICT (tag)
-           DO UPDATE SET
-             post_count   = hashtags.post_count + 1,
-             last_seen_at = NOW()
-           RETURNING id`,
-          [tag]
-        );
-        const hashtagId = hashtagResult.rows[0].id;
+      // 1. Batch upsert all hashtags
+      // Sort hashtags alphabetically to prevent deadlocks (ensures all workers request locks in the same order)
+      const sortedHashtags = [...new Set(post.hashtags)].sort();
+      
+      await client.query(`
+        INSERT INTO hashtags (tag, post_count, first_seen_at, last_seen_at)
+        SELECT unnest($1::text[]), 1, NOW(), NOW()
+        ON CONFLICT (tag) DO UPDATE SET
+          post_count = hashtags.post_count + 1,
+          last_seen_at = NOW()
+      `, [sortedHashtags]);
 
-        // Insert post_hashtags
-        await client.query(
-          `INSERT INTO post_hashtags (post_id, hashtag_id, platform_id)
-           VALUES ($1, $2, $3)
-           ON CONFLICT (post_id, hashtag_id) DO NOTHING`,
-          [postDbId, hashtagId, platformId]
-        );
+      // 2. Fetch all IDs
+      const hashtagRows = await client.query(
+        `SELECT id, tag FROM hashtags WHERE tag = ANY($1::text[])`,
+        [sortedHashtags]
+      );
+
+      // 3. Batch insert post_hashtags
+      if (hashtagRows.rows.length > 0) {
+        const vals = hashtagRows.rows
+          .map(h => `(${postDbId}, ${h.id}, ${platformId})`)
+          .join(',');
+        await client.query(`
+          INSERT INTO post_hashtags (post_id, hashtag_id, platform_id)
+          VALUES ${vals}
+          ON CONFLICT (post_id, hashtag_id) DO NOTHING
+        `);
       }
     }
 
@@ -162,6 +169,7 @@ async function processThresholdJob(job: Job<ThresholdJobDTO>): Promise<void> {
         comments: post.comments,
         views: post.views,
         postedAt: post.postedAt,
+        scrapedAt: post.scrapedAt,
         hashtags: post.hashtags
       };
       await intelligenceQueue.add(intelJob.jobType, intelJob, { jobId: intelJob.jobId });

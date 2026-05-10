@@ -17,7 +17,7 @@ export async function getThresholdRules(_req: Request, res: Response, next: Next
 export async function createThresholdRule(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const { platform_id, metric_name, operator, threshold_value } = req.body;
-    if (!platform_id || !metric_name || !threshold_value === undefined) {
+    if (!platform_id || !metric_name || threshold_value === undefined) {
       return next(new ValidationError('platform_id, metric_name, and threshold_value are required'));
     }
     const result = await db.query(
