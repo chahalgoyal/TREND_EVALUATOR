@@ -10,9 +10,9 @@
  */
 export function calculateEngagementRate(likes: number, comments: number, views: number): number {
   if (views <= 0) {
-    // If we don't have views (e.g. some IG posts), we cap engagement rate based on raw likes
-    // We treat 100k likes as a "perfect" 100 score if no views exist.
-    return Math.min((likes / 100000) * 100, 100);
+    // Estimate quality based on like magnitude only. Log scale prevents cliff.
+    // 1K likes → ~30, 100K likes → ~50, 1M likes → ~60, 10M likes -> ~70
+    return likes > 0 ? Math.min(Math.log10(likes) * 10, 70) : 0;
   }
 
   const rawScore = (likes * 1) + (comments * 5);
@@ -33,7 +33,14 @@ export function calculateEngagementRate(likes: number, comments: number, views: 
  * @returns Gravity-adjusted score
  */
 export function calculateTimeDecayScore(engagementRate: number, postedAt?: string): number {
-  if (!postedAt) return engagementRate; // No decay if we don't know the age
+  if (!postedAt) {
+    // Conservative assumption: 24 hours old. Prevents undated posts from
+    // outranking all dated content while still allowing them to surface.
+    const fallbackAgeHours = 24;
+    const gravity = 1.8;
+    const score = engagementRate / Math.pow(fallbackAgeHours + 2, gravity);
+    return Number(score.toFixed(4));
+  }
 
   const postedDate = new Date(postedAt);
   const now = new Date();
@@ -68,8 +75,8 @@ export function calculateVelocity(currentMentions: number, previousMentions: num
  */
 export function calculateFinalTrendScore(likes: number, decayedEngagementScore: number): number {
   // Base 10 log of likes gives us a magnitude (e.g. 1,000,000 likes = 6)
-  // We multiply by 10 to give it a 1-100ish scale
-  const volumeScore = likes > 0 ? Math.log10(likes) * 10 : 0;
+  // Map log10(likes) to 0–100. 100K likes = ~55, 10M likes = ~77, 1B = 100.
+  const volumeScore = likes > 0 ? Math.min(Math.log10(likes) * 11.11, 100) : 0;
   
   // Final score is a mix of volume and quality
   const finalScore = (volumeScore * 0.4) + (decayedEngagementScore * 0.6);

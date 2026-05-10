@@ -5,6 +5,7 @@ import { env } from '../../config/env';
 import { logger } from '../../shared/logger';
 import { ParseJobDTO, ThresholdJobDTO } from '../../queues/dto';
 import { thresholdQueue } from '../../queues/threshold.queue';
+import { db } from '../../config/database';
 import { rawStorageRepository } from '../scraper/raw-storage/rawStorage.repository';
 import { normalizePost } from './normalizer';
 
@@ -28,6 +29,11 @@ async function processParseJob(job: Job<ParseJobDTO>): Promise<void> {
   const rawPayload = await rawStorageRepository.getById(data.rawPayloadId);
   if (!rawPayload) {
     jobLogger.error('Raw payload not found — may have expired');
+    await db.query(
+      `UPDATE scrape_jobs SET error_message = COALESCE(error_message,'') || 'PARSE_MISS;'
+       WHERE id = $1`,
+      [data.scrapeJobDbId ?? null]
+    );
     return; // Don't retry — data is gone
   }
 

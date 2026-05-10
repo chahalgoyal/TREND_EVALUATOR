@@ -35,50 +35,47 @@ async function processIntelligenceJob(job: Job<IntelligenceJobDTO>): Promise<voi
 
     jobLogger.debug({ engagementRate, timeDecayScore, totalTrendScore }, 'Post scores saved');
 
-    // 2. Process Hashtags
-    for (const tag of data.hashtags) {
-      // Find hashtag ID
-      const hashtagRes = await db.query(`SELECT id FROM hashtags WHERE tag = $1`, [tag]);
-      if (!hashtagRes.rows[0]) continue;
-      const hashtagId = hashtagRes.rows[0].id;
+      // 2. Process Hashtags
+      const bucketDate = data.scrapedAt.split('T')[0]; // Extract YYYY-MM-DD
 
-      // Upsert today's bucket
-      await db.query(`
-        INSERT INTO hashtag_analytics (hashtag_id, date_bucket, mentions_count)
-        VALUES ($1, CURRENT_DATE, 1)
-        ON CONFLICT (hashtag_id, date_bucket) DO UPDATE SET mentions_count = hashtag_analytics.mentions_count + 1
-      `, [hashtagId]);
+      for (const tag of data.hashtags) {
+        // Find hashtag ID
+        const hashtagRes = await db.query(`SELECT id FROM hashtags WHERE tag = $1`, [tag]);
+        if (!hashtagRes.rows[0]) continue;
+        const hashtagId = hashtagRes.rows[0].id;
 
-      // Calculate velocity (Compare today vs yesterday)
-      const statsRes = await db.query(`
-        SELECT date_bucket, mentions_count FROM hashtag_analytics 
-        WHERE hashtag_id = $1 AND date_bucket >= CURRENT_DATE - INTERVAL '1 day'
-        ORDER BY date_bucket DESC
-      `, [hashtagId]);
+        // Upsert correct date bucket
+        await db.query(`
+          INSERT INTO hashtag_analytics (hashtag_id, date_bucket, mentions_count)
+          VALUES ($1, $2, 1)
+          ON CONFLICT (hashtag_id, date_bucket) DO UPDATE SET mentions_count = hashtag_analytics.mentions_count + 1
+        `, [hashtagId, bucketDate]);
 
-      let todayMentions = 0;
-      let yesterdayMentions = 0;
+        // Calculate velocity (Compare bucket date vs day before bucket date)
+        const statsRes = await db.query(`
+          SELECT 
+            SUM(CASE WHEN date_bucket = $2::date THEN mentions_count ELSE 0 END) as today_count,
+            SUM(CASE WHEN date_bucket = $2::date - INTERVAL '1 day' THEN mentions_count ELSE 0 END) as yesterday_count
+          FROM hashtag_analytics 
+          WHERE hashtag_id = $1 AND date_bucket >= $2::date - INTERVAL '1 day' AND date_bucket <= $2::date
+        `, [hashtagId, bucketDate]);
 
-      statsRes.rows.forEach(r => {
-        const d = new Date(r.date_bucket);
-        const today = new Date();
-        if (d.getUTCFullYear() === today.getUTCFullYear() && d.getUTCDate() === today.getUTCDate()) {
-          todayMentions = r.mentions_count;
-        } else {
-          yesterdayMentions = r.mentions_count;
-        }
-      });
+        const todayMentions = parseInt(statsRes.rows[0].today_count || '0', 10);
+        const yesterdayMentions = parseInt(statsRes.rows[0].yesterday_count || '0', 10);
 
-      const velocity = calculateVelocity(todayMentions, yesterdayMentions);
-      const isBreakout = velocity >= 500 && todayMentions >= 5; // Needs at least 5 mentions to be breakout
+        const velocity = calculateVelocity(todayMentions, yesterdayMentions);
+        // Breakout: >150% growth AND at least 10 mentions AND grew by at least 5 mentions
+        const isBreakout = velocity >= 150 
+          && todayMentions >= 10 
+          && (todayMentions - yesterdayMentions) >= 5;
 
-      // Update analytics with velocity
-      await db.query(`
-        UPDATE hashtag_analytics 
-        SET velocity_percentage = $1, is_breakout = $2
-        WHERE hashtag_id = $3 AND date_bucket = CURRENT_DATE
-      `, [velocity, isBreakout, hashtagId]);
-    }
+        // Update analytics with velocity
+        await db.query(`
+          UPDATE hashtag_analytics 
+          SET velocity_percentage = $1, is_breakout = $2
+          WHERE hashtag_id = $3 AND date_bucket = $4
+        `, [velocity, isBreakout, hashtagId, bucketDate]);
+      }
 
     jobLogger.info('Intelligence job completed successfully');
   } catch (err: any) {

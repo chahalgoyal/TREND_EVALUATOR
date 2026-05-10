@@ -54,6 +54,7 @@ async function backfill() {
       comments: post.comments,
       views: post.views,
       postedAt: post.posted_at,
+      scrapedAt: post.scraped_at,
       hashtags
     };
     

@@ -34,14 +34,18 @@ export function parseEngagementCount(raw: string | null | undefined): number {
   if (!raw) return 0;
   const cleaned = raw.replace(/,/g, '').trim().toLowerCase();
 
-  if (cleaned.includes('k')) {
-    return Math.round(parseFloat(cleaned) * 1000);
+  // Use endsWith to avoid false positives (e.g. 'likes' contains 'k', 'comments' contains 'm')
+  if (cleaned.endsWith('k')) {
+    const parsed = parseFloat(cleaned);
+    return isNaN(parsed) ? 0 : Math.round(parsed * 1000);
   }
-  if (cleaned.includes('m')) {
-    return Math.round(parseFloat(cleaned) * 1000000);
+  if (cleaned.endsWith('m')) {
+    const parsed = parseFloat(cleaned);
+    return isNaN(parsed) ? 0 : Math.round(parsed * 1000000);
   }
-  if (cleaned.includes('b')) {
-    return Math.round(parseFloat(cleaned) * 1000000000);
+  if (cleaned.endsWith('b')) {
+    const parsed = parseFloat(cleaned);
+    return isNaN(parsed) ? 0 : Math.round(parsed * 1000000000);
   }
 
   const num = parseInt(cleaned, 10);
@@ -110,12 +114,14 @@ function extractFromInterceptedApis(
   comments: number;
   authorUsername: string | null;
   authorId: string | null;
+  postedAt: string | null;
 } {
   let bestCaption: string | null = null;
   let bestLikes = 0;
   let bestComments = 0;
   let authorUsername: string | null = null;
   let authorId: string | null = null;
+  let postedAt: string | null = null;
 
   let exactMatchFound = false;
 
@@ -158,6 +164,16 @@ function extractFromInterceptedApis(
         bestComments = Math.max(bestComments, itemComments);
         if (itemAuthor) authorUsername = itemAuthor;
         if (itemAuthorId) authorId = itemAuthorId;
+        
+        // Extract timestamp (Instagram uses 'taken_at' as unix timestamp)
+        if (item.taken_at) {
+          postedAt = new Date(item.taken_at * 1000).toISOString();
+        } else if (item.device_timestamp) {
+          // Sometimes it's microseconds or milliseconds, safely parse
+          const ts = typeof item.device_timestamp === 'string' ? parseInt(item.device_timestamp) : item.device_timestamp;
+          postedAt = new Date(ts > 9999999999 ? ts / 1000 : ts * 1000).toISOString();
+        }
+
         exactMatchFound = true;
         break; // Exact match found, stop looking
       }
@@ -170,7 +186,7 @@ function extractFromInterceptedApis(
     }
   }
 
-  return { caption: bestCaption, likes: bestLikes, comments: bestComments, authorUsername, authorId };
+  return { caption: bestCaption, likes: bestLikes, comments: bestComments, authorUsername, authorId, postedAt };
 }
 
 /**
@@ -232,6 +248,7 @@ export function normalizePost(params: {
   let caption = textContent.slice(0, 2000); // cap caption length
   let authorId: string | undefined;
   let authorUsername: string | undefined;
+  let postedAt: string | undefined;
 
   // Strategy 0: YouTube Data API v3 JSON payload
   if (platform === 'youtube' && json && !json.interceptedApis) {
@@ -242,6 +259,7 @@ export function normalizePost(params: {
     views = parseInt(json.statistics?.viewCount || '0', 10);
     authorId = json.channelId;
     authorUsername = json.channelTitle;
+    postedAt = json.publishedAt;
     
     // YouTube specific hashtags can also come from tags array
     if (json.tags && Array.isArray(json.tags)) {
@@ -269,6 +287,7 @@ export function normalizePost(params: {
     // Use API author info
     if (apiData.authorUsername) authorUsername = apiData.authorUsername;
     if (apiData.authorId) authorId = apiData.authorId;
+    if (apiData.postedAt) postedAt = apiData.postedAt;
 
     // Fallback: also try the old embedded JSON extraction
     for (const api of json.interceptedApis) {
@@ -345,6 +364,7 @@ export function normalizePost(params: {
     views: Math.max(0, views),
     sourceType,
     scrapedAt,
+    postedAt,
     rawPayloadId,
     schemaVersion: 'v1',
   };
