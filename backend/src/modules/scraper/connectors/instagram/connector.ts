@@ -6,6 +6,7 @@ import { instagramConfig as cfg } from './config';
 import { env } from '../../../../config/env';
 import { logger } from '../../../../shared/logger';
 import { AdaptiveThrottler } from '../../throttler/adaptive.throttler';
+import { notifyCritical, notifyError, notifyWarn } from '../../../../services/notification.service';
 
 export class InstagramConnector implements PlatformConnector {
   readonly platform = 'instagram';
@@ -163,15 +164,18 @@ export class InstagramConnector implements PlatformConnector {
 
       const loggedIn = await this.isLoggedIn(page);
       if (loggedIn) {
-        logger.info('Instagram: Automated login successful');
-      } else {
-        logger.error('Instagram: Automated login failed — run save-session.ts to login manually');
+        logger.info('Instagram: Login successful');
+        await page.close();
+        return true;
       }
 
+      logger.error('Instagram: Login failed — no logged-in indicators found after submission');
+      await notifyError('Instagram Login Failed', `Account: ${env.instagram.username}\nIndicators not found after login attempt.`);
       await page.close();
-      return loggedIn;
-    } catch (err) {
-      logger.error({ err }, 'Instagram: Login error');
+      return false;
+    } catch (err: any) {
+      logger.error({ err }, 'Instagram: Critical login error');
+      await notifyCritical('Instagram Login Crash', `Account: ${env.instagram.username}\nError: ${err.message}`);
       await page.close();
       return false;
     }
@@ -220,38 +224,19 @@ export class InstagramConnector implements PlatformConnector {
   // ── Scrape Feed ────────────────────────────────────────────────────────────
   async scrapeFeed(context: BrowserContext, maxPosts?: number): Promise<RawPostFragment[]> {
     const max = maxPosts ?? cfg.scraping.defaultMaxPosts;
-    const page = await context.newPage();
     const fragments: RawPostFragment[] = [];
     const seenPostIds = new Set<string>();
+    const discoveredLinks: { href: string; postId: string }[] = [];
 
-    // Intercept API responses for enrichment
-    const apiResponses: any[] = [];
-    page.on('response', async (response) => {
-      const url = response.url();
-      if (
-        url.includes('/api/v1/feed/') ||
-        url.includes('/api/v1/media/') ||
-        url.includes('graphql') ||
-        url.includes('/api/v1/discover/')
-      ) {
-        try {
-          const json = await response.json();
-          apiResponses.push(json);
-        } catch { /* non-json response */ }
-      }
-    });
-
+    // ── Phase 1: Discover post IDs from the Explore grid ────────────────────
+    const explorePage = await context.newPage();
     try {
-      logger.info({ maxPosts: max }, 'Instagram: Scraping Explore page');
-      await page.goto('https://www.instagram.com/explore/', { waitUntil: 'domcontentloaded', timeout: 30000 });
-      await page.waitForTimeout(cfg.scraping.postLoadWait);
+      logger.info({ maxPosts: max }, 'Instagram: Phase 1 — Discovering posts from Explore grid');
+      await explorePage.goto('https://www.instagram.com/explore/', { waitUntil: 'domcontentloaded', timeout: 30000 });
+      await explorePage.waitForTimeout(cfg.scraping.postLoadWait);
 
-      for (let scroll = 0; scroll < cfg.scraping.maxScrolls && fragments.length < max; scroll++) {
-        // Explore page uses a grid of thumbnails, so there are no "more" buttons to click.
-        // We rely on the intercepted GraphQL/API responses to provide the full caption and engagement data.
-
-        // Find all post links
-        const postLinks = await page.$$eval('a[href*="/p/"], a[href*="/reel/"]', (links) =>
+      for (let scroll = 0; scroll < cfg.scraping.maxScrolls && discoveredLinks.length < max; scroll++) {
+        const postLinks = await explorePage.$$eval('a[href*="/p/"], a[href*="/reel/"]', (links) =>
           links.map((a) => {
             const href = a.getAttribute('href') || '';
             const match = href.match(/\/(p|reel)\/([^/]+)/);
@@ -260,49 +245,90 @@ export class InstagramConnector implements PlatformConnector {
         );
 
         for (const link of postLinks) {
-          if (seenPostIds.has(link.postId) || fragments.length >= max) continue;
-          seenPostIds.add(link.postId);
-
-          // For Explore grid, the item is usually just an <a> wrapped in a <div>
-          let articleHtml = '';
-          try {
-            // Try to grab the parent container for more context if possible
-            articleHtml = await page.$eval(
-              `div:has(> a[href*="${link.postId}"])`,
-              (el) => el.outerHTML
-            );
-          } catch {
-            // Fallback — just use the anchor
-            articleHtml = `<a href="${link.href}" data-post-id="${link.postId}"></a>`;
+          if (!seenPostIds.has(link.postId) && discoveredLinks.length < max) {
+            seenPostIds.add(link.postId);
+            discoveredLinks.push(link);
           }
-
-          fragments.push({
-            platform: 'instagram',
-            postId: link.postId,
-            postHtml: articleHtml,
-            postJson: apiResponses.length > 0 ? { interceptedApis: [...apiResponses] } : undefined,
-            source: 'feed',
-            scrapedAt: new Date().toISOString(),
-          });
-
-          this.throttler.reportSuccess();
         }
 
-        // Scroll down
-        await page.evaluate(() => window.scrollBy(0, window.innerHeight * 2));
-        await this.throttler.wait();
-        await page.waitForTimeout(cfg.scraping.scrollDelay);
+        await explorePage.evaluate(() => window.scrollBy(0, window.innerHeight * 2));
+        await explorePage.waitForTimeout(cfg.scraping.scrollDelay);
       }
 
-      logger.info({ postsScraped: fragments.length }, 'Instagram: Feed scrape complete');
-      await page.close();
-      return fragments;
-    } catch (err) {
-      logger.error({ err }, 'Instagram: Feed scrape error');
-      await page.close();
-      return fragments;
+      logger.info({ discovered: discoveredLinks.length }, 'Instagram: Phase 1 complete');
+    } catch (err: any) {
+      logger.error({ err }, 'Instagram: Phase 1 Explore discovery error');
+      await notifyCritical('Instagram Phase 1 Failed', `Explore page unreachable or discovery crashed.\nError: ${err.message}`);
+    } finally {
+      await explorePage.close();
     }
+
+    // ── Phase 2: Visit each post page to capture real engagement data ────────
+    logger.info({ total: discoveredLinks.length }, 'Instagram: Phase 2 — Fetching per-post engagement');
+
+    try {
+    for (const link of discoveredLinks) {
+      if (fragments.length >= max) break;
+
+      const postApiData: any[] = [];
+      const postPage = await context.newPage();
+
+      postPage.on('response', async (response) => {
+        const url = response.url();
+        if (
+          url.includes('/api/v1/media/') ||
+          url.includes('graphql') ||
+          url.includes('/api/v1/feed/reels_media/') ||
+          url.includes(`/p/${link.postId}/`)
+        ) {
+          try {
+            const json = await response.json();
+            postApiData.push(json);
+          } catch { /* non-json */ }
+        }
+      });
+
+      try {
+        const postUrl = `https://www.instagram.com${link.href}`;
+        await postPage.goto(postUrl, { waitUntil: 'domcontentloaded', timeout: 20000 });
+        await postPage.waitForTimeout(2500); // Wait for media API to fire
+
+        const articleHtml = await postPage.content().catch(() => '');
+
+        fragments.push({
+          platform: 'instagram',
+          postId: link.postId,
+          postHtml: articleHtml,
+          postJson: postApiData.length > 0 ? { interceptedApis: [...postApiData] } : undefined,
+          source: 'feed',
+          scrapedAt: new Date().toISOString(),
+        });
+
+        this.throttler.reportSuccess();
+        logger.debug({ postId: link.postId, apiResponses: postApiData.length }, 'Instagram: Post scraped');
+      } catch (err: any) {
+        logger.warn({ postId: link.postId, err }, 'Instagram: Failed to load post page, skipping');
+        await notifyWarn('Instagram Post Skip', `Failed to scrape individual post page: ${link.postId}\nError: ${err.message}`);
+        this.throttler.reportFailure();
+      } finally {
+        await postPage.close();
+      }
+
+      await this.throttler.wait();
+    }
+
+    if (fragments.length === 0 && discoveredLinks.length > 0) {
+      await notifyError('Instagram Scrape Zero Yield', `Discovered ${discoveredLinks.length} posts but failed to scrape any in Phase 2.`);
+    }
+
+    logger.info({ postsScraped: fragments.length }, 'Instagram: Feed scrape complete (two-phase)');
+    return fragments;
+  } catch (err: any) {
+    logger.error({ err }, 'Instagram: Feed scrape error');
+    await notifyError('Instagram Feed Scrape Error', `Unrecoverable error in scrapeFeed pipeline.\nError: ${err.message}`);
+    return fragments;
   }
+}
 
   // ── Scrape by Keyword/Hashtag ──────────────────────────────────────────────
   async scrapeKeyword(context: BrowserContext, keyword: string, maxPosts?: number): Promise<RawPostFragment[]> {
@@ -348,8 +374,9 @@ export class InstagramConnector implements PlatformConnector {
       logger.info({ keyword: cleanKeyword, postsScraped: fragments.length }, 'Instagram: Keyword scrape complete');
       await page.close();
       return fragments;
-    } catch (err) {
+    } catch (err: any) {
       logger.error({ err, keyword }, 'Instagram: Keyword scrape error');
+      await notifyError('Instagram Keyword Scrape Error', `Keyword: ${keyword}\nError: ${err.message}`);
       await page.close();
       return fragments;
     }
@@ -398,8 +425,9 @@ export class InstagramConnector implements PlatformConnector {
       logger.info({ profileId, postsScraped: fragments.length }, 'Instagram: Profile scrape complete');
       await page.close();
       return fragments;
-    } catch (err) {
+    } catch (err: any) {
       logger.error({ err, profileId }, 'Instagram: Profile scrape error');
+      await notifyError('Instagram Profile Scrape Error', `Profile: ${profileId}\nError: ${err.message}`);
       await page.close();
       return fragments;
     }

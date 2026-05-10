@@ -9,6 +9,7 @@ import {
   calculateFinalTrendScore,
   calculateVelocity
 } from './algorithms';
+import { notifyError } from '../../services/notification.service';
 
 async function processIntelligenceJob(job: Job<IntelligenceJobDTO>): Promise<void> {
   const data = job.data;
@@ -77,9 +78,10 @@ async function processIntelligenceJob(job: Job<IntelligenceJobDTO>): Promise<voi
         `, [velocity, isBreakout, hashtagId, bucketDate]);
       }
 
-    jobLogger.info('Intelligence job completed successfully');
+    jobLogger.info('Intelligence job completed');
   } catch (err: any) {
     jobLogger.error({ err: err.message }, 'Intelligence job failed');
+    await notifyError('Intelligence Calculation Error', `Job ID: ${data.jobId}\nPost ID: ${data.postDbId}\nError: ${err.message}`);
     throw err;
   }
 }
@@ -91,8 +93,11 @@ export function startIntelligenceWorker() {
   if (intelligenceWorker) return;
   intelligenceWorker = new Worker<IntelligenceJobDTO>('intelligenceQueue', processIntelligenceJob, { connection: redis });
   
-  intelligenceWorker.on('failed', (job, err) => {
-    logger.error({ jobId: job?.id, err: err.message }, 'Intelligence worker job failed');
+  intelligenceWorker.on('failed', async (job, err) => {
+    logger.error({ jobId: job?.data.jobId, err: err.message }, 'intelligenceQueue: Job failed');
+    if (job && job.attemptsMade >= (job.opts.attempts || 1)) {
+      await notifyError('Intelligence Job FATAL', `Job ID: ${job.id} failed after all retries.\nError: ${err.message}`);
+    }
   });
 
   logger.info('🧠 Intelligence Worker started');

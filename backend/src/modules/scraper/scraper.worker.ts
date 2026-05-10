@@ -13,6 +13,7 @@ import { InstagramConnector } from './connectors/instagram/connector';
 import { LinkedInConnector } from './connectors/linkedin/connector';
 import { YouTubeConnector } from './connectors/youtube/connector';
 import { PlatformConnector, RawPostFragment } from './connectors/interface';
+import { notifyCritical, notifyError, notifyHealth } from '../../services/notification.service';
 
 // ── Platform connector registry ──────────────────────────────────────────────
 const connectors: Record<string, PlatformConnector> = {
@@ -215,6 +216,7 @@ async function processScrapeJob(job: Job<ScrapeJobDTO>): Promise<void> {
 
       if (fragments.length === 0) {
         jobLogger.error('🚨 WARNING: Selectors or API interception might be broken - 0 posts extracted!');
+        await notifyHealth('Zero Posts Extracted', `Platform: ${data.platform}\nScrape cycle completed but 0 posts were discovered. Session may be invalid or Explore page changed.`);
       }
 
       postsScraped = await storeAndEnqueueFragments(fragments, platformId, data, jobLogger);
@@ -237,6 +239,15 @@ async function processScrapeJob(job: Job<ScrapeJobDTO>): Promise<void> {
       `UPDATE scrape_jobs SET status = 'failed', error_message = $2, completed_at = NOW(), posts_scraped = $3 WHERE id = $1`,
       [data.scrapeJobDbId, err.message, postsScraped]
     );
+
+    // Notify: login failures are errors; browser pool exhaustion is critical
+    if (err.message?.includes('Login failed')) {
+      await notifyError('Scraper Login Failed', `Platform: ${data.platform}\nAccount ID: ${data.accountId ?? 'filesystem'}\nError: ${err.message}`);
+    } else if (err.message?.includes('browser') || err.message?.includes('pool')) {
+      await notifyCritical('Browser Pool Error', `Platform: ${data.platform}\nFailed to acquire browser.\nError: ${err.message}`);
+    } else {
+      await notifyError('Scrape Job Failed', `Platform: ${data.platform}\nJob ID: ${data.jobId}\nError: ${err.message}`);
+    }
 
     throw err; // Let BullMQ handle retry
   } finally {
@@ -310,8 +321,11 @@ export function startScrapeWorker(): Worker<ScrapeJobDTO> {
     logger.info({ jobId: job.data.jobId }, 'scrapeQueue: Job completed');
   });
 
-  scrapeWorker.on('failed', (job, err) => {
+  scrapeWorker.on('failed', async (job, err) => {
     logger.error({ jobId: job?.data.jobId, err: err.message }, 'scrapeQueue: Job failed');
+    if (job && job.attemptsMade >= (job.opts.attempts || 1)) {
+      await notifyCritical('Scrape Job FATAL', `Platform: ${job.data.platform}\nJob ID: ${job.id} failed after all retries.\nError: ${err.message}`);
+    }
   });
 
   logger.info({ concurrency: env.workers.scrapeWorkerConcurrency }, 'Scrape worker started');

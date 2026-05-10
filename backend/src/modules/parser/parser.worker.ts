@@ -8,6 +8,7 @@ import { thresholdQueue } from '../../queues/threshold.queue';
 import { db } from '../../config/database';
 import { rawStorageRepository } from '../scraper/raw-storage/rawStorage.repository';
 import { normalizePost } from './normalizer';
+import { notifyError, notifyWarn } from '../../services/notification.service';
 
 /**
  * Parser Worker — processes parseQueue jobs.
@@ -107,6 +108,8 @@ async function processParseJob(job: Job<ParseJobDTO>): Promise<void> {
   } catch (err: any) {
     await rawStorageRepository.updateStatus(data.rawPayloadId, 'failed');
     jobLogger.error({ err: err.message }, 'Parse job failed');
+    // notifyWarn here for individual failure, the worker level 'failed' handles the final notifyError
+    await notifyWarn('Parser Job Failed', `Platform: ${data.platform}\nPayload: ${data.rawPayloadId}\nError: ${err.message}`);
     throw err;
   }
 }
@@ -127,8 +130,11 @@ export function startParseWorker(): Worker<ParseJobDTO> {
     logger.info({ jobId: job.data.jobId }, 'parseQueue: Job completed');
   });
 
-  parseWorker.on('failed', (job, err) => {
+  parseWorker.on('failed', async (job, err) => {
     logger.error({ jobId: job?.data.jobId, err: err.message }, 'parseQueue: Job failed');
+    if (job && job.attemptsMade >= (job.opts.attempts || 1)) {
+      await notifyError('Parser Job FATAL', `Platform: ${job.data.platform}\nJob ID: ${job.id} failed after all retries.\nError: ${err.message}`);
+    }
   });
 
   logger.info({ concurrency: env.workers.parseWorkerConcurrency }, 'Parse worker started');

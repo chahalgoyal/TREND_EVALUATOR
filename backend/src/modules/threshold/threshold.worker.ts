@@ -6,6 +6,7 @@ import { logger } from '../../shared/logger';
 import { ThresholdJobDTO, NormalizedPostDTO, IntelligenceJobDTO } from '../../queues/dto';
 import { intelligenceQueue } from '../../queues/intelligence.queue';
 import { v4 as uuidv4 } from 'uuid';
+import { notifyError } from '../../services/notification.service';
 
 /**
  * Threshold Worker — evaluates posts against engagement rules.
@@ -176,8 +177,10 @@ async function processThresholdJob(job: Job<ThresholdJobDTO>): Promise<void> {
       jobLogger.info('Dispatched to intelligenceQueue');
     }
 
-  } catch (err) {
+  } catch (err: any) {
     await client.query('ROLLBACK');
+    jobLogger.error({ err: err.message }, 'Threshold job failed (DB transaction)');
+    await notifyError('Threshold DB Error', `Platform: ${post.platform}\nPost ID: ${post.platformPostId}\nError: ${err.message}`);
     throw err;
   } finally {
     client.release();
@@ -222,8 +225,11 @@ export function startThresholdWorker(): Worker<ThresholdJobDTO> {
     logger.info({ jobId: job.data.jobId }, 'thresholdQueue: Job completed');
   });
 
-  thresholdWorker.on('failed', (job, err) => {
+  thresholdWorker.on('failed', async (job, err) => {
     logger.error({ jobId: job?.data.jobId, err: err.message }, 'thresholdQueue: Job failed');
+    if (job && job.attemptsMade >= (job.opts.attempts || 1)) {
+      await notifyError('Threshold Job FATAL', `Job ID: ${job.id} failed after all retries.\nError: ${err.message}`);
+    }
   });
 
   logger.info({ concurrency: env.workers.thresholdWorkerConcurrency }, 'Threshold worker started');

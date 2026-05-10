@@ -5,6 +5,7 @@ import { scrapeQueue } from '../../../queues/scrape.queue';
 import { ScrapeJobDTO } from '../../../queues/dto';
 import { logger } from '../../../shared/logger';
 import { env } from '../../../config/env';
+import { notifyCritical } from '../../../services/notification.service';
 
 /**
  * Scheduler — fires scrapeQueue jobs per platform interval.
@@ -97,10 +98,14 @@ export function startScheduler(): void {
             'Scheduler: selected account (round-robin LRU)'
           );
         } else if (platform.slug !== 'youtube') {
-          // Critical error if no accounts for browser-based platforms
+          // Critical: no accounts available for browser-based platform
           logger.error(
             { platform: platform.slug },
-            'CRITICAL: No active accounts found in database for platform. Scrape might fail or use unreliable fallback.'
+            'CRITICAL: No active accounts found in database for platform.'
+          );
+          await notifyCritical(
+            'No Active Accounts',
+            `Platform: ${platform.slug}\nAll accounts are inactive or rate-limited. Scraping will fail until an account is re-enabled.`
           );
         } else {
           logger.debug(

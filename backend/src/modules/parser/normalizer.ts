@@ -129,6 +129,13 @@ function extractFromInterceptedApis(
     if (exactMatchFound) break;
     // Recursively find media items in the JSON tree
     const items = collectMediaItems(api);
+    if (items.length > 0) {
+      logger.debug({ 
+        targetPostId, 
+        itemsFound: items.length,
+        itemCodes: items.slice(0, 3).map(i => ({ code: i.code || i.shortcode, likes: i.like_count || i.edge_media_preview_like?.count }))
+      }, 'API matching debug');
+    }
     for (const item of items) {
       // Match against the target post ID (Instagram shortcodes, URNs, etc.)
       const itemCode = item.code || item.shortcode || '';
@@ -144,22 +151,22 @@ function extractFromInterceptedApis(
         || null;
 
       // Extract engagement
-      const itemLikes = item?.like_count
-        ?? item?.edge_media_preview_like?.count
-        ?? 0;
-      const itemComments = item?.comment_count
-        ?? item?.edge_media_to_parent_comment?.count
-        ?? item?.edge_media_to_comment?.count
-        ?? 0;
+      // Sanity cap: Instagram's all-time record is ~60M likes. Anything above 100M
+      // is almost certainly a timestamp or media ID being confused for a count.
+      const MAX_REALISTIC_COUNT = 100_000_000;
+      const rawLikes    = item?.like_count ?? item?.edge_media_preview_like?.count ?? 0;
+      const rawComments = item?.comment_count ?? item?.edge_media_to_parent_comment?.count ?? item?.edge_media_to_comment?.count ?? 0;
+      const itemLikes    = typeof rawLikes    === 'number' && rawLikes    < MAX_REALISTIC_COUNT ? rawLikes    : 0;
+      const itemComments = typeof rawComments === 'number' && rawComments < MAX_REALISTIC_COUNT ? rawComments : 0;
 
       // Extract author
       const user = item?.user || item?.owner;
       const itemAuthor = user?.username || null;
       const itemAuthorId = user?.pk ? String(user.pk) : (user?.id ? String(user.id) : null);
 
-      if (isMatch && captionText) {
+      if (isMatch) {
         // Exact match — use ALL data (caption, engagement, author)
-        bestCaption = captionText;
+        if (captionText) bestCaption = captionText;
         bestLikes = Math.max(bestLikes, itemLikes);
         bestComments = Math.max(bestComments, itemComments);
         if (itemAuthor) authorUsername = itemAuthor;
@@ -274,10 +281,10 @@ export function normalizePost(params: {
   if (json?.interceptedApis && Array.isArray(json.interceptedApis)) {
     const apiData = extractFromInterceptedApis(json.interceptedApis, platformPostId, platform);
 
-    // Use API caption if it's longer (the HTML caption is truncated by "...more")
-    if (apiData.caption && apiData.caption.length > caption.length) {
-      caption = apiData.caption.slice(0, 5000); // allow longer captions from API
-      logger.debug({ platformPostId, captionLen: caption.length }, 'Using full caption from intercepted API');
+    // Use API caption if it exists — it's way cleaner than the full post page HTML text
+    if (apiData.caption) {
+      caption = apiData.caption.slice(0, 5000);
+      logger.debug({ platformPostId, captionLen: caption.length }, 'Using clean caption from intercepted API');
     }
 
     // Use API engagement (exact numbers, not "161.8K" approximations)

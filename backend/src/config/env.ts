@@ -45,6 +45,11 @@ const envSchema = z.object({
 
   // Cache
   CACHE_TTL_SECONDS: z.string().default('30'),
+
+  // Discord Notifications (optional)
+  DISCORD_WEBHOOK_CRITICAL: z.string().default(''),
+  DISCORD_WEBHOOK_ERRORS:   z.string().default(''),
+  DISCORD_WEBHOOK_HEALTH:   z.string().default(''),
 });
 
 const parsed = envSchema.safeParse(process.env);
@@ -105,5 +110,11 @@ export const env = {
 
   cache: {
     ttlSeconds: parseInt(parsed.data.CACHE_TTL_SECONDS, 10),
+  },
+
+  discord: {
+    webhookCritical: parsed.data.DISCORD_WEBHOOK_CRITICAL,
+    webhookErrors:   parsed.data.DISCORD_WEBHOOK_ERRORS,
+    webhookHealth:   parsed.data.DISCORD_WEBHOOK_HEALTH,
   },
 };

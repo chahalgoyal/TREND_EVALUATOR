@@ -30,7 +30,7 @@ export const instagramConfig = {
   scraping: {
     scrollDelay: 2000,       // ms between scrolls
     maxScrolls: 10,          // max scroll iterations
-    defaultMaxPosts: 15,     // default posts per scrape
+    defaultMaxPosts: 15,     // balanced for two-phase scrape (discovery vs stealth)
     postLoadWait: 3000,      // wait after navigation for posts to load
     loginWait: 5000,         // wait after login submission
   },
