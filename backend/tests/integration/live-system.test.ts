@@ -68,7 +68,7 @@ describe('Live System: API Server', () => {
 describe('Live System: Round-Robin Account Rotation', () => {
   it('YouTube accounts alternate last_used_at timestamps', () => {
     const rows = PSQL(
-      "SELECT username, last_used_at FROM platform_accounts WHERE platform_id = 21 ORDER BY last_used_at DESC"
+      "SELECT username, last_used_at FROM platform_accounts WHERE platform_id = (SELECT id FROM platforms WHERE slug = 'youtube') ORDER BY last_used_at DESC"
     );
     // Both keys should have been used
     expect(rows.length).toBeGreaterThanOrEqual(2);

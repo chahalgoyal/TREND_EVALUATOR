@@ -255,6 +255,12 @@ export class InstagramConnector implements PlatformConnector {
         await explorePage.waitForTimeout(cfg.scraping.scrollDelay);
       }
 
+      if (discoveredLinks.length === 0) {
+        const currentUrl = explorePage.url();
+        logger.warn({ currentUrl }, 'Instagram: Phase 1 found 0 links. Taking debug screenshot.');
+        await explorePage.screenshot({ path: `session-store/debug_explore_zero_links_${Date.now()}.png` });
+      }
+
       logger.info({ discovered: discoveredLinks.length }, 'Instagram: Phase 1 complete');
     } catch (err: any) {
       logger.error({ err }, 'Instagram: Phase 1 Explore discovery error');

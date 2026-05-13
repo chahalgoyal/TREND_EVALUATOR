@@ -216,7 +216,16 @@ async function processScrapeJob(job: Job<ScrapeJobDTO>): Promise<void> {
 
       if (fragments.length === 0) {
         jobLogger.error('🚨 WARNING: Selectors or API interception might be broken - 0 posts extracted!');
-        await notifyHealth('Zero Posts Extracted', `Platform: ${data.platform}\nScrape cycle completed but 0 posts were discovered. Session may be invalid or Explore page changed.`);
+        await notifyHealth(
+          'Zero Posts Extracted', 
+          `Scrape cycle completed but 0 posts were discovered. Session may be invalid or Explore page changed.`,
+          [
+            { name: 'Platform', value: data.platform, inline: true },
+            { name: 'Account ID', value: data.accountId ?? 'anonymous/filesystem', inline: true },
+            { name: 'Scrape Job DB ID', value: data.scrapeJobDbId, inline: false },
+            { name: 'Queue Job ID', value: data.jobId, inline: false }
+          ]
+        );
       }
 
       postsScraped = await storeAndEnqueueFragments(fragments, platformId, data, jobLogger);
@@ -240,13 +249,21 @@ async function processScrapeJob(job: Job<ScrapeJobDTO>): Promise<void> {
       [data.scrapeJobDbId, err.message, postsScraped]
     );
 
+    // Common fields for all error notifications
+    const errorFields = [
+      { name: 'Platform', value: data.platform, inline: true },
+      { name: 'Account ID', value: data.accountId ?? 'anonymous/filesystem', inline: true },
+      { name: 'Scrape Job DB ID', value: data.scrapeJobDbId, inline: false },
+      { name: 'Queue Job ID', value: data.jobId, inline: false }
+    ];
+
     // Notify: login failures are errors; browser pool exhaustion is critical
     if (err.message?.includes('Login failed')) {
-      await notifyError('Scraper Login Failed', `Platform: ${data.platform}\nAccount ID: ${data.accountId ?? 'filesystem'}\nError: ${err.message}`);
+      await notifyError('Scraper Login Failed', err.message, errorFields);
     } else if (err.message?.includes('browser') || err.message?.includes('pool')) {
-      await notifyCritical('Browser Pool Error', `Platform: ${data.platform}\nFailed to acquire browser.\nError: ${err.message}`);
+      await notifyCritical('Browser Pool Error', err.message, errorFields);
     } else {
-      await notifyError('Scrape Job Failed', `Platform: ${data.platform}\nJob ID: ${data.jobId}\nError: ${err.message}`);
+      await notifyError('Scrape Job Failed', err.message, errorFields);
     }
 
     throw err; // Let BullMQ handle retry

@@ -108,7 +108,7 @@ describe('Database: posts', () => {
 
   it('newer posts have posted_at populated (from normalizer fix)', () => {
     const rows = PSQL(
-      "SELECT COUNT(*) as cnt FROM posts WHERE platform_id = 21 AND posted_at IS NOT NULL"
+      "SELECT COUNT(*) as cnt FROM posts WHERE platform_id = (SELECT id FROM platforms WHERE slug = 'youtube') AND posted_at IS NOT NULL"
     );
     // YouTube posts should have timestamps
     expect(parseInt(rows[0].cnt)).toBeGreaterThan(0);

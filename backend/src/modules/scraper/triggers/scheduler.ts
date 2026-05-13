@@ -32,9 +32,11 @@ export function startScheduler(): void {
         if (platform.slug === 'linkedin') {
           // LinkedIn: skip dynamic calc, use its own configured interval
           quantum = platform.scrape_interval_min;
-        } else if (numAccounts > 0) {
-          // Time quantum = 15 mins / numAccounts, with a hard floor of 2 mins
-          quantum = Math.max(Math.floor(15 / numAccounts), 2);
+        } else {
+          // Global Minimum Strategy: Never scrape a platform more than once every 15 minutes.
+          // We no longer divide by numAccounts. The scheduler simply uses the least-recently-used
+          // account every 15 minutes, ensuring the IP rests, but accounts rest even longer.
+          quantum = Math.max(platform.scrape_interval_min || 15, 15);
         }
 
         // Check if a scheduled job was recently created using the dynamic quantum
