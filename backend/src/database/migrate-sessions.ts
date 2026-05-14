@@ -19,7 +19,7 @@ async function migrateSessions() {
   const accountsToMigrate: { platform: string; username: string; filePath: string }[] = [];
 
   for (const file of files) {
-    const match = file.match(/^(instagram|linkedin)_(.+)_state\.json$/);
+    const match = file.match(/^(instagram|linkedin|youtube)_(.+)_state\.json$/);
     if (match) {
       accountsToMigrate.push({
         platform: match[1],

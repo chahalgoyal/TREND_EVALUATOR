@@ -314,7 +314,15 @@ export class InstagramConnector implements PlatformConnector {
         logger.debug({ postId: link.postId, apiResponses: postApiData.length }, 'Instagram: Post scraped');
       } catch (err: any) {
         logger.warn({ postId: link.postId, err }, 'Instagram: Failed to load post page, skipping');
-        await notifyWarn('Instagram Post Skip', `Failed to scrape individual post page: ${link.postId}\nError: ${err.message}`);
+        const screenshotPath = `session-store/debug_timeout_${link.postId}_${Date.now()}.png`;
+        try {
+          await postPage.screenshot({ path: screenshotPath });
+          logger.info(`Saved debug screenshot to ${screenshotPath}`);
+          await notifyWarn('Instagram Post Skip', `Failed to scrape individual post page: ${link.postId}\nError: ${err.message}\nScreenshot saved to server at: ${screenshotPath}`);
+        } catch (screenshotErr) {
+          logger.error({ err: screenshotErr }, 'Failed to take debug screenshot');
+          await notifyWarn('Instagram Post Skip', `Failed to scrape individual post page: ${link.postId}\nError: ${err.message}`);
+        }
         this.throttler.reportFailure();
       } finally {
         await postPage.close();
