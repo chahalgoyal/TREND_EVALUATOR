@@ -29,15 +29,12 @@ export function startScheduler(): void {
         let quantum = platform.scrape_interval_min;
         const numAccounts = parseInt(platform.num_accounts, 10);
 
-        if (platform.slug === 'linkedin') {
-          // LinkedIn: skip dynamic calc, use its own configured interval
-          quantum = platform.scrape_interval_min;
-        } else {
-          // Global Minimum Strategy: Never scrape a platform more than once every 15 minutes.
-          // We no longer divide by numAccounts. The scheduler simply uses the least-recently-used
-          // account every 15 minutes, ensuring the IP rests, but accounts rest even longer.
-          quantum = Math.max(platform.scrape_interval_min || 15, 15);
-        }
+        // Per-Account Scaling Strategy:
+        // We want each INDIVIDUAL account to rest for at least N minutes.
+        // So we divide the target interval by the number of active accounts.
+        // e.g., if goal is 16m and we have 4 accounts, we fire every 4m.
+        const goalPerAccount = platform.scrape_interval_min || 16;
+        quantum = Math.max(goalPerAccount / (numAccounts || 1), 1);
 
         // Check if a scheduled job was recently created using the dynamic quantum
         const recentJob = await db.query(
