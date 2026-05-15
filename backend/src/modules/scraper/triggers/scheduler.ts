@@ -30,11 +30,15 @@ export function startScheduler(): void {
         const numAccounts = parseInt(platform.num_accounts, 10);
 
         // Per-Account Scaling Strategy:
-        // We want each INDIVIDUAL account to rest for at least N minutes.
-        // So we divide the target interval by the number of active accounts.
-        // e.g., if goal is 16m and we have 4 accounts, we fire every 4m.
         const goalPerAccount = platform.scrape_interval_min || 16;
-        quantum = Math.max(goalPerAccount / (numAccounts || 1), 1);
+        let calculatedQuantum = goalPerAccount / (numAccounts || 1);
+
+        // Platform-Specific Safety Floor (Protects the Server IP):
+        // Instagram needs at least 12 mins between any two scrapes on one IP.
+        // YouTube API is safe to run as fast as 1 min between scrapes.
+        const safetyFloor = platform.slug === 'instagram' ? 12 : 1;
+        
+        quantum = Math.max(calculatedQuantum, safetyFloor);
 
         // Check if a scheduled job was recently created using the dynamic quantum
         const recentJob = await db.query(
