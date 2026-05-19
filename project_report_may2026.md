@@ -48,7 +48,7 @@ Data is useless without meaning. We needed to filter out the noise and mathemati
 
 ---
 
-## Phase 4: Containerization & Deployment
+## Phase 4: Containerization & Local Orchestration
 ### The Vision
 The system needed to run entirely autonomously in the background without tying up a local terminal or relying on the host machine's specific Node version.
 
@@ -62,19 +62,54 @@ The system needed to run entirely autonomously in the background without tying u
 
 ---
 
-## Phase 5: Scaling, Account Rotation, & Pipeline Stabilization (Current)
+## Phase 5: Scaling, Account Rotation, & Pipeline Stabilization
 ### The Challenges
 Relying on a single `.env` API key or a single `session.json` file created severe bottlenecks. Platforms would rate-limit the IP or block the single account, bringing the whole pipeline to a halt. Furthermore, database disk usage was growing unboundedly due to raw payload storage.
 
 ### Implementation Details
 *   **Database-Driven Session Management:** We completely migrated session management (cookies for Playwright, API keys for YouTube) from the local filesystem into a highly secure `platform_accounts` PostgreSQL table.
-*   **LRU Round-Robin Scheduler:** We modified the core `scheduler.ts` cron job. Instead of blindly using a hardcoded key, the scheduler now queries the database for the Least Recently Used (`ORDER BY last_used_at ASC`) active account. This allows us to load 10 different Instagram accounts or 5 YouTube API keys, and the system will automatically cycle through them evenly, entirely bypassing rate limits.
-*   **Automated Data Cleanup:** Implemented a midnight cron task that automatically purges `raw_payloads` older than 72 hours (`RAW_PAYLOAD_TTL_HOURS`), ensuring the database disk footprint remains stable permanently.
-*   **Velocity Bug Eradication:** We identified a severe timezone/SQL-interval bug where the hashtag velocity was permanently returning `-100.00%`. We rewrote the SQL interval logic using standard `CURRENT_DATE - 1`, deployed the fix by rebuilding the Docker image, and ran a massive SQL backfill query that repaired 834 historically broken rows in production.
+*   **LRU Round-Robin Scheduler:** We modified the core `scheduler.ts` cron job. Instead of blindly using a hardcoded key, the scheduler now queries the database for the Least Recently Used (`ORDER BY last_used_at ASC`) active account. This allows us to load multiple accounts (Instagram, LinkedIn, YouTube) and automatically cycle through them evenly, significantly reducing the risk of rate limits.
+*   **Claim Check Pattern & Automated Data Cleanup:** To prevent Redis from crashing due to memory bloat, large JSON/HTML payloads are never passed directly through the queue. They are saved to `raw_payloads` and only a UUID is passed. A midnight cron task purges payloads older than 24 hours (`RAW_PAYLOAD_TTL_HOURS`), ensuring the database disk footprint remains stable permanently.
+
+---
+
+## Phase 6: Production Cloud Deployment & Architecture Resilience (Current)
+### The Vision
+Transition the system from local Docker development to a fully autonomous, live production environment running 24/7 on a remote cloud server.
+
+### The Challenges & Engineered Solutions
+*   **The Headless Auth Barrier:** Cloud datacenters (like Azure) are instantly flagged by Instagram/LinkedIn, triggering CAPTCHAs, 2FA prompts, and immediate blocks for headless browsers.
+    *   *Solution (Local-to-Cloud Auth Bridge):* Accounts are logged in securely on a local PC browser using Playwright's UI. The authenticated session state is serialized to JSON and securely transmitted via `scp` to the Azure server. A custom `migrate-sessions.ts` script dynamically ingests these states directly into the PostgreSQL account pool, allowing the cloud scraper to bypass login entirely.
+*   **Chromium Memory Leaks & VM Freezing (OOM):** The 4GB Azure Virtual Machine repeatedly crashed and froze. Investigation revealed that when platforms served heavy anti-bot payloads or ran for prolonged periods, Chromium accumulated slow V8 memory leaks (~15MB per cycle) over days, leading to Linux Out-Of-Memory deadlocks.
+    *   *First-Response Solution (Timeout Screenshot Radar):* Wrapped the navigation logic in a strict try-catch block. If a node times out, the system automatically captures a full-page debug screenshot (`postPage.screenshot()`), saves it to a persistent mapped volume, instantly pings the developer via Discord, gracefully destroys the browser context, and safely rotates to the next account.
+    *   *Root-Cause Solution (Dynamic Browser Recycling Pool):* Re-engineered the `BrowserPool` logic to implement a strict **job-based recycling counter**. Every Chromium browser instance is now automatically terminated and replaced with a fresh process after exactly **8 jobs** (~2 hours of active runtime), fully flushing the V8 heap memory and preventing OOM deadlocks entirely while maintaining concurrency.
+*   **Stubborn Docker Volume Permissions:** Updating cloud session states became impossible because Docker aggressively locked the Linux `session-store` folder with `root` privileges, rejecting SSH/SCP transfers.
+    *   *Solution:* Standardized a safe teardown DevOps workflow. By running `docker compose down`, the kernel releases strict volume locks, allowing the local PC to push new state files before bringing the container stack back up.
+
+### Deployment Specs
+*   **Cloud Platform:** Microsoft Azure (Central India Region)
+*   **Infrastructure:** Ubuntu 24.04 LTS, Standard_B2als_v2 (2 vCPUs, 4GB RAM)
+*   **Monitoring:** Discord Webhooks (Real-time telemetry and alerting)
+*   **Live Access:** The system connects via SSH tunneling for secure database management via pgAdmin/DBeaver.
+
+---
+
+## Phase 7: Full-Stack Intelligence — SvelteKit Frontend Dashboard
+### The Vision
+Raw tables and logs are fine for machine monitoring, but a truly scalable business engine requires immediate, executive-level visualization. We needed a fast, responsive, and stunning frontend to surface the extracted intelligence.
+
+### Implementation Details
+*   **Modern SvelteKit & Svelte 5 Runes:** Scaffolded a blazing-fast SvelteKit application utilizing the latest **Svelte 5 reactive runes (`$state`, `$derived`, `$props`)** for hyper-efficient UI updates and minimal boilerplate.
+*   **Node.js Proxy / CORS Bypass Bridge:** The Azure Express backend did not expose CORS endpoints for public web browser clients. To safely fetch live data without opening security holes, we built a Node.js server-side proxy directly inside SvelteKit (`+page.server.ts`). All live metrics, analytics, and hashtag tracking lists are securely resolved on the Svelte backend before delivering rendered HTML to the client.
+*   **Interactive Visualization Engine:** Integrated `Chart.js` to deliver responsive, rich dashboards:
+    *   *Hashtag Velocity Charts:* Multi-dataset line charts showing the real-time "Breakout" scores of competing hashtags over time.
+    *   *Engagement Breakdown:* Horizontal bar charts displaying precise distribution counts of high-performing metrics.
+*   **Universal Type Safety:** Standardized strict TypeScript types across the entire frontend codebase, resolving legacy standard Font-Weight limits and ensuring perfect compatibility with downstream modules.
 
 ---
 
 ## Conclusion
-What started as a superficial idea for extracting tags has matured into a resilient, scalable, and autonomous data pipeline. 
+What started as a superficial idea for extracting tags has matured into a resilient, fully realized, and highly available full-stack enterprise dashboard.
 
-By aggressively decoupling the architecture (Scrape -> Parse -> Threshold -> Intelligence), enforcing strict database constraints, containerizing the environment, and implementing enterprise-grade account rotation, the Social Trend Intelligence system is now fully equipped to run autonomously in production.
+By aggressively decoupling the architecture (Scrape -> Parse -> Threshold -> Intelligence), enforcing strict database constraints, engineering browser-level memory recycling, containerizing the environment, and bridging it seamlessly into a beautiful SvelteKit visual dashboard, the Social Trend Intelligence system is now fully equipped to run autonomously and beautifully in production.
+
