@@ -10,10 +10,7 @@ const PLATFORMS: Record<string, { loginUrl?: string; feedUrl?: string; isApi?: b
     loginUrl: 'https://www.instagram.com/accounts/login/',
     feedUrl: 'https://www.instagram.com/explore/',
   },
-  linkedin: {
-    loginUrl: 'https://www.linkedin.com/login',
-    feedUrl: 'https://www.linkedin.com/feed/',
-  },
+
   youtube: {
     isApi: true
   }
@@ -26,7 +23,7 @@ async function saveSession() {
 
   if (!platform || !PLATFORMS[platform]) {
     console.error('Usage:');
-    console.error('  Instagram/LinkedIn: npx tsx src/modules/scraper/save-session.ts <platform> <username>');
+    console.error('  Instagram:          npx tsx src/modules/scraper/save-session.ts instagram <username>');
     console.error('  YouTube:            npx tsx src/modules/scraper/save-session.ts youtube <key_name> <api_key>');
     process.exit(1);
   }
@@ -46,7 +43,7 @@ async function saveSession() {
     console.log(`\n📺 YouTube API Key Mode: ${username}`);
     sessionData = { apiKey };
   } else {
-    // ── Browser-based (Instagram/LinkedIn) ──
+    // ── Browser-based (Instagram) ──
     if (!username) {
       console.error(`Usage for ${platform}: npx tsx src/modules/scraper/save-session.ts ${platform} <username>`);
       process.exit(1);

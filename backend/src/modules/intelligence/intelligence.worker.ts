@@ -37,45 +37,47 @@ async function processIntelligenceJob(job: Job<IntelligenceJobDTO>): Promise<voi
     jobLogger.debug({ engagementRate, timeDecayScore, totalTrendScore }, 'Post scores saved');
 
       // 2. Process Hashtags
-      const bucketDate = data.scrapedAt.split('T')[0]; // Extract YYYY-MM-DD
+      if (data.isNewInsert) {
+        const bucketDate = data.scrapedAt.split('T')[0]; // Extract YYYY-MM-DD
 
-      for (const tag of data.hashtags) {
-        // Find hashtag ID
-        const hashtagRes = await db.query(`SELECT id FROM hashtags WHERE tag = $1`, [tag]);
-        if (!hashtagRes.rows[0]) continue;
-        const hashtagId = hashtagRes.rows[0].id;
+        for (const tag of data.hashtags) {
+          // Find hashtag ID
+          const hashtagRes = await db.query(`SELECT id FROM hashtags WHERE tag = $1`, [tag]);
+          if (!hashtagRes.rows[0]) continue;
+          const hashtagId = hashtagRes.rows[0].id;
 
-        // Upsert correct date bucket
-        await db.query(`
-          INSERT INTO hashtag_analytics (hashtag_id, date_bucket, mentions_count)
-          VALUES ($1, $2, 1)
-          ON CONFLICT (hashtag_id, date_bucket) DO UPDATE SET mentions_count = hashtag_analytics.mentions_count + 1
-        `, [hashtagId, bucketDate]);
+          // Upsert correct date bucket
+          await db.query(`
+            INSERT INTO hashtag_analytics (hashtag_id, date_bucket, mentions_count)
+            VALUES ($1, $2, 1)
+            ON CONFLICT (hashtag_id, date_bucket) DO UPDATE SET mentions_count = hashtag_analytics.mentions_count + 1
+          `, [hashtagId, bucketDate]);
 
-        // Calculate velocity (Compare bucket date vs day before bucket date)
-        const statsRes = await db.query(`
-          SELECT 
-            SUM(CASE WHEN date_bucket = $2::date THEN mentions_count ELSE 0 END) as today_count,
-            SUM(CASE WHEN date_bucket = $2::date - INTERVAL '1 day' THEN mentions_count ELSE 0 END) as yesterday_count
-          FROM hashtag_analytics 
-          WHERE hashtag_id = $1 AND date_bucket >= $2::date - INTERVAL '1 day' AND date_bucket <= $2::date
-        `, [hashtagId, bucketDate]);
+          // Calculate velocity (Compare bucket date vs day before bucket date)
+          const statsRes = await db.query(`
+            SELECT 
+              SUM(CASE WHEN date_bucket = $2::date THEN mentions_count ELSE 0 END) as today_count,
+              SUM(CASE WHEN date_bucket = $2::date - INTERVAL '1 day' THEN mentions_count ELSE 0 END) as yesterday_count
+            FROM hashtag_analytics 
+            WHERE hashtag_id = $1 AND date_bucket >= $2::date - INTERVAL '1 day' AND date_bucket <= $2::date
+          `, [hashtagId, bucketDate]);
 
-        const todayMentions = parseInt(statsRes.rows[0].today_count || '0', 10);
-        const yesterdayMentions = parseInt(statsRes.rows[0].yesterday_count || '0', 10);
+          const todayMentions = parseInt(statsRes.rows[0].today_count || '0', 10);
+          const yesterdayMentions = parseInt(statsRes.rows[0].yesterday_count || '0', 10);
 
-        const velocity = calculateVelocity(todayMentions, yesterdayMentions);
-        // Breakout: >150% growth AND at least 10 mentions AND grew by at least 5 mentions
-        const isBreakout = velocity >= 150 
-          && todayMentions >= 10 
-          && (todayMentions - yesterdayMentions) >= 5;
+          const velocity = calculateVelocity(todayMentions, yesterdayMentions);
+          // Breakout: >150% growth AND at least 10 mentions AND grew by at least 5 mentions
+          const isBreakout = velocity >= 150 
+            && todayMentions >= 10 
+            && (todayMentions - yesterdayMentions) >= 5;
 
-        // Update analytics with velocity
-        await db.query(`
-          UPDATE hashtag_analytics 
-          SET velocity_percentage = $1, is_breakout = $2
-          WHERE hashtag_id = $3 AND date_bucket = $4
-        `, [velocity, isBreakout, hashtagId, bucketDate]);
+          // Update analytics with velocity
+          await db.query(`
+            UPDATE hashtag_analytics 
+            SET velocity_percentage = $1, is_breakout = $2
+            WHERE hashtag_id = $3 AND date_bucket = $4
+          `, [velocity, isBreakout, hashtagId, bucketDate]);
+        }
       }
 
     jobLogger.info('Intelligence job completed');

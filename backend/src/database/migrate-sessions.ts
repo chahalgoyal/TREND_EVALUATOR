@@ -19,7 +19,7 @@ async function migrateSessions() {
   const accountsToMigrate: { platform: string; username: string; filePath: string }[] = [];
 
   for (const file of files) {
-    const match = file.match(/^(instagram|linkedin|youtube)_(.+)_state\.json$/);
+    const match = file.match(/^(instagram|youtube)_(.+)_state\.json$/);
     if (match) {
       accountsToMigrate.push({
         platform: match[1],
@@ -31,8 +31,7 @@ async function migrateSessions() {
 
   // 2. Fallback checks for legacy file format: <platform>_state.json
   const fallbackConfigs = [
-    { platform: 'instagram', username: env.instagram.username, file: 'instagram_state.json' },
-    { platform: 'linkedin', username: env.linkedin.username, file: 'linkedin_state.json' }
+    { platform: 'instagram', username: env.instagram.username, file: 'instagram_state.json' }
   ];
 
   for (const fb of fallbackConfigs) {

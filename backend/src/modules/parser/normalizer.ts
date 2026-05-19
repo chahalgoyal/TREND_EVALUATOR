@@ -26,9 +26,14 @@ export function extractHashtags(text: string | null | undefined): string[] {
   return Array.from(tags);
 }
 
+// Instagram's all-time record is ~60M likes. 100M is a safe cap.
+// Anything above this is almost certainly a timestamp or media ID.
+const MAX_REALISTIC_ENGAGEMENT = 100_000_000;
+
 /**
  * Parse engagement count string into a number.
- * Handles: '12,345', '1.2K', '3.5M', 'No likes', etc.
+ * Handles: '12,345', '1.2K', '3.5M', '246K', 'No likes', etc.
+ * Hard caps at MAX_REALISTIC_ENGAGEMENT to prevent ID/timestamp pollution.
  */
 export function parseEngagementCount(raw: string | null | undefined): number {
   if (!raw) return 0;
@@ -37,19 +42,24 @@ export function parseEngagementCount(raw: string | null | undefined): number {
   // Use endsWith to avoid false positives (e.g. 'likes' contains 'k', 'comments' contains 'm')
   if (cleaned.endsWith('k')) {
     const parsed = parseFloat(cleaned);
-    return isNaN(parsed) ? 0 : Math.round(parsed * 1000);
+    const result = isNaN(parsed) ? 0 : Math.round(parsed * 1000);
+    return Math.min(result, MAX_REALISTIC_ENGAGEMENT);
   }
   if (cleaned.endsWith('m')) {
     const parsed = parseFloat(cleaned);
-    return isNaN(parsed) ? 0 : Math.round(parsed * 1000000);
+    const result = isNaN(parsed) ? 0 : Math.round(parsed * 1_000_000);
+    return Math.min(result, MAX_REALISTIC_ENGAGEMENT);
   }
+  // 'b' suffix is NEVER a real engagement metric on any platform — reject entirely.
+  // A raw string ending in 'b' is almost certainly a hash, ID, or word fragment.
   if (cleaned.endsWith('b')) {
-    const parsed = parseFloat(cleaned);
-    return isNaN(parsed) ? 0 : Math.round(parsed * 1000000000);
+    return 0;
   }
 
   const num = parseInt(cleaned, 10);
-  return isNaN(num) ? 0 : num;
+  if (isNaN(num)) return 0;
+  // Raw integer counts above the cap are IDs/timestamps, not engagement.
+  return num < MAX_REALISTIC_ENGAGEMENT ? num : 0;
 }
 
 /**
@@ -137,7 +147,7 @@ function extractFromInterceptedApis(
       }, 'API matching debug');
     }
     for (const item of items) {
-      // Match against the target post ID (Instagram shortcodes, URNs, etc.)
+      // Match against the target post ID (Instagram shortcodes, IDs, etc.)
       const itemCode = item.code || item.shortcode || '';
       const itemId = String(item.id || item.pk || '');
       const isMatch = targetPostId === itemCode ||
@@ -304,6 +314,22 @@ export function normalizePost(params: {
     }
   }
 
+  // Strategy 1.5: OG/Twitter meta description — most reliable for Instagram HTML.
+  // Instagram injects "246K likes, 1,961 comments - username on DATE: caption"
+  // directly into the <meta name="description"> and <meta property="og:description"> tags.
+  // The raw HTML stores attributes as content="246K likes..." so we match accordingly.
+  if (html && likes === 0) {
+    // Matches: content="246K likes, 1,961 comments"
+    const metaDescMatch = html.match(/content="([\d,.]+[KkMm]?)\s+likes?,\s*([\d,.]+[KkMm]?)\s+comments?/i);
+    if (metaDescMatch) {
+      const metaLikes = parseEngagementCount(metaDescMatch[1]);
+      const metaComments = parseEngagementCount(metaDescMatch[2]);
+      if (metaLikes > 0) likes = metaLikes;
+      if (metaComments > 0) comments = metaComments;
+      logger.debug({ platformPostId, metaLikes, metaComments }, 'Used OG meta description for engagement');
+    }
+  }
+
   // Strategy 2: Embedded JSON in HTML
   if (html && likes === 0) {
     const embedded = extractEmbeddedJson(html);
@@ -314,27 +340,39 @@ export function normalizePost(params: {
     }
   }
 
-  // Strategy 3: Regex extraction from HTML text for engagement
+  // Strategy 3: aria-label on like/comment buttons — reliable short-form counts.
+  // Instagram renders these as aria-label="246K likes" on the heart button.
   if (html && likes === 0) {
-    // Check aria-labels first
-    const likeMatch = html.match(/aria-label="([\d,.]*[KkMm]?)\s*like/i);
+    const likeMatch = html.match(/aria-label="([\d,.]+[KkMm]?)\s*like/i);
     if (likeMatch) likes = parseEngagementCount(likeMatch[1]);
 
-    const commentMatch = html.match(/aria-label="([\d,.]*[KkMm]?)\s*comment/i);
+    const commentMatch = html.match(/aria-label="([\d,.]+[KkMm]?)\s*comment/i);
     if (commentMatch) comments = parseEngagementCount(commentMatch[1]);
   }
 
-  // Strategy 4: Aggressive plain text parsing from textContent
+  // Strategy 4: Plain text last-resort fallback.
+  // IMPORTANT: Only allow K/M suffixed values here. Raw integers from textContent
+  // are extremely likely to be media IDs, timestamps, or CSS pixel values.
+  // The regex explicitly requires a K or M suffix to be accepted.
   if (likes === 0 && textContent) {
-    let textLikeMatch = textContent.match(/likes?\s+([\d,.]+[KkMm]?)/i);
-    if (!textLikeMatch) textLikeMatch = textContent.match(/([\d,.]+[KkMm]?)\s+likes?/i);
-    if (!textLikeMatch) textLikeMatch = textContent.match(/([\d,.]+[KkMm]?)\s+others?/i);
-    if (textLikeMatch) likes = parseEngagementCount(textLikeMatch[1]);
+    const likePatterns = [
+      /([\d,.]+[KkMm])\s+likes?/i,        // "246K likes"
+      /likes?[:\s]+([\d,.]+[KkMm])/i,      // "likes: 246K"
+    ];
+    for (const pattern of likePatterns) {
+      const m = textContent.match(pattern);
+      if (m) { likes = parseEngagementCount(m[1]); break; }
+    }
   }
   if (comments === 0 && textContent) {
-    let textCommentMatch = textContent.match(/comments?\s+([\d,.]+[KkMm]?)/i);
-    if (!textCommentMatch) textCommentMatch = textContent.match(/([\d,.]+[KkMm]?)\s+comments?/i);
-    if (textCommentMatch) comments = parseEngagementCount(textCommentMatch[1]);
+    const commentPatterns = [
+      /([\d,.]+[KkMm])\s+comments?/i,
+      /comments?[:\s]+([\d,.]+[KkMm])/i,
+    ];
+    for (const pattern of commentPatterns) {
+      const m = textContent.match(pattern);
+      if (m) { comments = parseEngagementCount(m[1]); break; }
+    }
   }
 
   // LinkedIn engagement from HTML

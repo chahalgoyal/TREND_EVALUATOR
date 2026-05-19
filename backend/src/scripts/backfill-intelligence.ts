@@ -55,7 +55,8 @@ async function backfill() {
       views: post.views,
       postedAt: post.posted_at,
       scrapedAt: post.scraped_at,
-      hashtags
+      hashtags,
+      isNewInsert: false
     };
     
     await intelligenceQueue.add(intelJob.jobType, intelJob, { jobId: intelJob.jobId });

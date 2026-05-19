@@ -7,7 +7,7 @@ import { logger } from '../../../../shared/logger';
 /**
  * YouTubeConnector — API-based connector for YouTube Shorts.
  * 
- * Unlike Instagram/LinkedIn connectors that use Playwright browser scraping,
+ * Unlike Instagram connector that uses Playwright browser scraping,
  * this connector uses the YouTube Data API v3 (free tier: 10,000 units/day).
  * 
  * Quota costs:
@@ -35,28 +35,19 @@ export class YouTubeConnector implements PlatformConnector {
   // ── Scrape Feed (trending Shorts) ─────────────────────────────────────────
   async scrapeFeed(_context: BrowserContext, maxPosts?: number): Promise<RawPostFragment[]> {
     const max = maxPosts ?? cfg.scraping.defaultMaxResults;
-    logger.info({ maxPosts: max }, 'YouTube: Fetching trending Shorts');
+    logger.info({ maxPosts: max }, 'YouTube: Fetching trending Shorts via mostPopular chart');
 
     try {
-      // Step 1: Search for popular/trending short videos
       const apiKey = (_context as any)?.apiKey;
-      const searchResults = await this.searchShorts({
-        q: '#shorts', // Using #shorts as query since search.list needs a query
-        maxResults: max,
-        apiKey
-      });
+      const trendingShorts = await this.getTrendingShorts(max, apiKey);
 
-      if (searchResults.length === 0) {
-        logger.warn('YouTube: No Shorts found in trending feed');
+      if (trendingShorts.length === 0) {
+        logger.warn('YouTube: No trending Shorts found');
         return [];
       }
 
-      // Step 2: Enrich with full statistics
-      const videoIds = searchResults.map((r) => r.videoId);
-      const enriched = await this.getVideoDetails(videoIds, apiKey);
-
       // Step 3: Build RawPostFragments
-      const fragments = this.buildFragments(enriched, 'feed');
+      const fragments = this.buildFragments(trendingShorts, 'feed');
 
       logger.info({ postsScraped: fragments.length }, 'YouTube: Feed scrape complete');
       return fragments;
@@ -127,6 +118,83 @@ export class YouTubeConnector implements PlatformConnector {
   }
 
   // ── Private: YouTube Data API calls ───────────────────────────────────────
+
+  /**
+   * Helper to parse ISO 8601 duration (e.g., PT1M5S) into seconds.
+   */
+  private parseIsoDurationToSeconds(duration: string): number {
+    const match = duration.match(/PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?/);
+    if (!match) return 0;
+    
+    const hours = parseInt(match[1] || '0', 10);
+    const minutes = parseInt(match[2] || '0', 10);
+    const seconds = parseInt(match[3] || '0', 10);
+    
+    return hours * 3600 + minutes * 60 + seconds;
+  }
+
+  /**
+   * Fetches actual trending videos using videos.list with chart=mostPopular.
+   * Filters client-side to only return videos <= 60 seconds (Shorts).
+   * Paginates automatically until maxResults Shorts are found or we run out of trending pages.
+   * Cost: 1 quota unit per page.
+   */
+  private async getTrendingShorts(maxResults: number, apiKeyOverride?: string): Promise<any[]> {
+    const apiKey = apiKeyOverride || env.youtube.apiKey;
+    const shorts: any[] = [];
+    let pageToken = '';
+
+    while (shorts.length < maxResults) {
+      const url = new URL(`${cfg.api.baseUrl}${cfg.api.endpoints.videos}`);
+      url.searchParams.set('key', apiKey);
+      url.searchParams.set('part', 'snippet,statistics,contentDetails');
+      url.searchParams.set('chart', 'mostPopular');
+      url.searchParams.set('regionCode', cfg.shorts.regionCode);
+      url.searchParams.set('maxResults', '50'); // Always fetch max to minimize pagination calls
+      if (pageToken) url.searchParams.set('pageToken', pageToken);
+
+      logger.debug({ pageToken }, 'YouTube API: videos.list (mostPopular)');
+
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 15000);
+
+      let response: Response;
+      try {
+        response = await fetch(url.toString(), { signal: controller.signal });
+      } catch (err: any) {
+        logger.error({ err: err.message }, 'YouTube API: getTrendingShorts fetch failed');
+        break;
+      } finally {
+        clearTimeout(timeout);
+      }
+
+      if (!response.ok) {
+        const errorBody = await response.text();
+        logger.error({ status: response.status, body: errorBody }, 'YouTube API: getTrendingShorts failed');
+        break;
+      }
+
+      const data = await response.json() as any;
+      const items = data.items || [];
+      if (items.length === 0) break;
+
+      // Filter for Shorts (duration <= 60 seconds)
+      for (const item of items) {
+        const durationStr = item.contentDetails?.duration || '';
+        const durationSec = this.parseIsoDurationToSeconds(durationStr);
+        
+        if (durationSec > 0 && durationSec <= 60) {
+          shorts.push(item);
+          if (shorts.length >= maxResults) break;
+        }
+      }
+
+      pageToken = data.nextPageToken || '';
+      if (!pageToken) break; // Reached end of trending list
+    }
+
+    return shorts;
+  }
 
   /**
    * Search for YouTube Shorts using the search.list endpoint.

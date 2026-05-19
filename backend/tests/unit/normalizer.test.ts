@@ -112,13 +112,30 @@ describe('parseEngagementCount', () => {
     expect(parseEngagementCount('1M')).toBe(1000000);
   });
 
-  it('parses B suffix (billions)', () => {
-    expect(parseEngagementCount('1.5B')).toBe(1500000000);
+  it('rejects B suffix — no platform shows "1.5B likes" to users', () => {
+    // The 'b' suffix was the source of the 4.02B likes bug.
+    // A string ending in 'b' is almost certainly a hash fragment, not a count.
+    expect(parseEngagementCount('1.5B')).toBe(0);
+    expect(parseEngagementCount('4.02b')).toBe(0);
+    expect(parseEngagementCount('1b')).toBe(0);
   });
 
   it('is case-insensitive for suffixes', () => {
     expect(parseEngagementCount('2.5k')).toBe(2500);
     expect(parseEngagementCount('3.1m')).toBe(3100000);
+  });
+
+  it('rejects raw integers above 100M — these are IDs or timestamps, not counts', () => {
+    // Instagram media IDs are 10+ digit numbers. They must never be stored as likes.
+    expect(parseEngagementCount('3895974960053527688')).toBe(0);
+    expect(parseEngagementCount('100000001')).toBe(0); // 1 above the cap
+    expect(parseEngagementCount('99999999')).toBe(99999999);  // 1 below the cap — valid
+  });
+
+  it('accepts realistic engagement numbers without suffix', () => {
+    expect(parseEngagementCount('1961')).toBe(1961);   // exact comment count
+    expect(parseEngagementCount('8500')).toBe(8500);
+    expect(parseEngagementCount('59999999')).toBe(59999999); // near record, still valid
   });
 });
 

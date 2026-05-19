@@ -121,10 +121,8 @@ async function processThresholdJob(job: Job<ThresholdJobDTO>): Promise<void> {
       
       await client.query(`
         INSERT INTO hashtags (tag, post_count, first_seen_at, last_seen_at)
-        SELECT unnest($1::text[]), 1, NOW(), NOW()
-        ON CONFLICT (tag) DO UPDATE SET
-          post_count = hashtags.post_count + 1,
-          last_seen_at = NOW()
+        SELECT unnest($1::text[]), 0, NOW(), NOW()
+        ON CONFLICT (tag) DO UPDATE SET last_seen_at = NOW()
       `, [sortedHashtags]);
 
       // 2. Fetch all IDs
@@ -133,16 +131,28 @@ async function processThresholdJob(job: Job<ThresholdJobDTO>): Promise<void> {
         [sortedHashtags]
       );
 
-      // 3. Batch insert post_hashtags
+      // 3. Batch insert post_hashtags and track which ones were newly associated
       if (hashtagRows.rows.length > 0) {
         const vals = hashtagRows.rows
           .map(h => `(${postDbId}, ${h.id}, ${platformId})`)
           .join(',');
-        await client.query(`
+        
+        const newlyAssociated = await client.query(`
           INSERT INTO post_hashtags (post_id, hashtag_id, platform_id)
           VALUES ${vals}
           ON CONFLICT (post_id, hashtag_id) DO NOTHING
+          RETURNING hashtag_id
         `);
+
+        // 4. Only increment post_count for hashtags that were actually newly associated with this post
+        if (newlyAssociated.rows.length > 0) {
+          const newHashtagIds = newlyAssociated.rows.map(r => r.hashtag_id);
+          await client.query(`
+            UPDATE hashtags 
+            SET post_count = post_count + 1 
+            WHERE id = ANY($1::bigint[])
+          `, [newHashtagIds]);
+        }
       }
     }
 
@@ -171,7 +181,8 @@ async function processThresholdJob(job: Job<ThresholdJobDTO>): Promise<void> {
         views: post.views,
         postedAt: post.postedAt,
         scrapedAt: post.scrapedAt,
-        hashtags: post.hashtags
+        hashtags: post.hashtags,
+        isNewInsert: isNewInsert
       };
       await intelligenceQueue.add(intelJob.jobType, intelJob, { jobId: intelJob.jobId });
       jobLogger.info('Dispatched to intelligenceQueue');
