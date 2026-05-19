@@ -10,7 +10,6 @@ import { browserPool } from './browser-pool/pool';
 import { sessionManager } from './session-manager/session';
 import { rawStorageRepository } from './raw-storage/rawStorage.repository';
 import { InstagramConnector } from './connectors/instagram/connector';
-import { LinkedInConnector } from './connectors/linkedin/connector';
 import { YouTubeConnector } from './connectors/youtube/connector';
 import { PlatformConnector, RawPostFragment } from './connectors/interface';
 import { notifyCritical, notifyError, notifyHealth } from '../../services/notification.service';
@@ -18,7 +17,6 @@ import { notifyCritical, notifyError, notifyHealth } from '../../services/notifi
 // ── Platform connector registry ──────────────────────────────────────────────
 const connectors: Record<string, PlatformConnector> = {
   instagram: new InstagramConnector(),
-  linkedin: new LinkedInConnector(),
   youtube: new YouTubeConnector(),
 };
 

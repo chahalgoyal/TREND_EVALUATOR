@@ -67,12 +67,6 @@ async function processParseJob(job: Job<ParseJobDTO>): Promise<void> {
       }
     }
 
-    // LinkedIn: data-urn attribute
-    const urnMatch = html.match(/data-urn="([^"]+)"/);
-    if (urnMatch) {
-      normalizedPost.platformPostId = urnMatch[1];
-    }
-    
     // YouTube: API JSON id
     if (data.platform === 'youtube' && rawPayload.payload_json && (rawPayload.payload_json as any).videoId) {
       normalizedPost.platformPostId = (rawPayload.payload_json as any).videoId;

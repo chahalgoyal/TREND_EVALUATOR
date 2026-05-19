@@ -113,80 +113,6 @@ const DEMO_POSTS = [
     authorUsername: 'dogsofinstagram',
     source: 'feed' as const,
   },
-
-  // LinkedIn — professional viral posts
-  {
-    platform: 'linkedin',
-    platformId: 2,
-    postId: 'urn:li:activity:7180001234567',
-    caption: 'Just got promoted to Senior Engineer after 3 years! Here are the 10 lessons I learned along the way. #career #software #engineering #growth #leadership #tech #promotion #learning #mentorship #success',
-    likes: 15200,
-    comments: 890,
-    shares: 2300,
-    views: 450000,
-    authorUsername: 'john-doe-engineer',
-    source: 'feed' as const,
-  },
-  {
-    platform: 'linkedin',
-    platformId: 2,
-    postId: 'urn:li:activity:7180002345678',
-    caption: 'We are hiring! 50+ open positions at our company. Remote-first culture, great benefits. #hiring #jobs #remote #work #opportunity #startup #recruiting #opentowork #jobsearch #techcareers',
-    likes: 8900,
-    comments: 340,
-    shares: 1800,
-    views: 280000,
-    authorUsername: 'sarah-recruiter',
-    source: 'feed' as const,
-  },
-  {
-    platform: 'linkedin',
-    platformId: 2,
-    postId: 'urn:li:activity:7180003456789',
-    caption: 'Unpopular opinion: Your resume does not matter as much as your network. #networking #career #jobhunt #professional #connections #linkedin #advice #careeradvice #resume #personalbranding',
-    likes: 22000,
-    comments: 1560,
-    shares: 4200,
-    views: 890000,
-    authorUsername: 'career-coach-mike',
-    source: 'feed' as const,
-  },
-  {
-    platform: 'linkedin',
-    platformId: 2,
-    postId: 'urn:li:activity:7180004567890',
-    caption: 'AI will not replace you. A person using AI will. Start learning today. #ai #artificialintelligence #futureofwork #automation #skills #upskilling #chatgpt #productivity #digital #transformation',
-    likes: 45000,
-    comments: 2800,
-    shares: 8900,
-    views: 1500000,
-    authorUsername: 'satya-nadella',
-    source: 'keyword' as const,
-  },
-  {
-    platform: 'linkedin',
-    platformId: 2,
-    postId: 'urn:li:activity:7180005678901',
-    caption: 'Our startup just raised $50M Series B! Grateful for the team and investors who believed in us. #startup #funding #venture #entrepreneurship #business #growth #milestone #grateful #team #investors',
-    likes: 12400,
-    comments: 780,
-    shares: 1500,
-    views: 340000,
-    authorUsername: 'founder-jane',
-    source: 'feed' as const,
-  },
-  {
-    platform: 'linkedin',
-    platformId: 2,
-    postId: 'urn:li:activity:7180006789012',
-    caption: 'Remote work is not dead. Here is why hybrid is the future of work. Data from 500 companies. #remotework #hybrid #futureofwork #workplace #culture #data #research #management #hr #workforce',
-    likes: 31000,
-    comments: 2100,
-    shares: 5600,
-    views: 920000,
-    authorUsername: 'hr-insights',
-    source: 'keyword' as const,
-  },
 ];
 
 // ── Build HTML fragments that look like real scraped content ──────────────────
@@ -210,23 +136,6 @@ function buildInstagramHtml(post: typeof DEMO_POSTS[0]): string {
 </article>`;
 }
 
-function buildLinkedInHtml(post: typeof DEMO_POSTS[0]): string {
-  return `
-<div class="feed-shared-update-v2" data-urn="${post.postId}">
-  <div class="feed-shared-actor">
-    <span>${post.authorUsername}</span>
-  </div>
-  <div class="feed-shared-text">
-    <span dir="ltr">${post.caption}</span>
-  </div>
-  <div class="social-details-social-counts">
-    <span class="social-details-social-counts__reactions-count">${post.likes.toLocaleString()} reactions</span>
-    <a class="social-details-social-counts__comments">
-      <span>${post.comments.toLocaleString()} comments</span>
-    </a>
-  </div>
-</div>`;
-}
 
 async function runDemoPipeline() {
   console.log('🚀 Demo Pipeline — pushing realistic data through the full queue system\n');
@@ -238,9 +147,7 @@ async function runDemoPipeline() {
     const rawPayloadId = uuidv4();
 
     // 1. Store raw payload in DB (simulates scraper output)
-    const html = post.platform === 'instagram'
-      ? buildInstagramHtml(post)
-      : buildLinkedInHtml(post);
+    const html = buildInstagramHtml(post);
 
     // Build a JSON payload with engagement data (simulates API interception)
     const apiJson = {

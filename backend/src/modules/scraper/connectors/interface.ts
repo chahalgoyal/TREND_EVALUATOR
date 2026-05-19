@@ -6,7 +6,7 @@ import { BrowserContext, Page } from 'playwright';
  * and output normalization behind a common contract.
  */
 export interface PlatformConnector {
-  /** Platform slug — 'instagram' | 'linkedin' | 'youtube' */
+  /** Platform slug — 'instagram' | 'youtube' */
   readonly platform: string;
 
   /**

@@ -26,10 +26,6 @@ const envSchema = z.object({
   INSTAGRAM_USERNAME: z.string(),
   INSTAGRAM_PASSWORD: z.string(),
 
-  // LinkedIn
-  LINKEDIN_USERNAME: z.string(),
-  LINKEDIN_PASSWORD: z.string(),
-
   // YouTube
   YOUTUBE_API_KEY: z.string().min(10),
 
@@ -85,11 +81,6 @@ export const env = {
   instagram: {
     username: parsed.data.INSTAGRAM_USERNAME,
     password: parsed.data.INSTAGRAM_PASSWORD,
-  },
-
-  linkedin: {
-    username: parsed.data.LINKEDIN_USERNAME,
-    password: parsed.data.LINKEDIN_PASSWORD,
   },
 
   youtube: {

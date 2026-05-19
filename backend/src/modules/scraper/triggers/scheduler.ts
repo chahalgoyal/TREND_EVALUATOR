@@ -37,7 +37,7 @@ export function startScheduler(): void {
         // Instagram needs at least 12 mins between any two scrapes on one IP.
         // YouTube API is safe to run as fast as 1 min between scrapes.
         const safetyFloor = platform.slug === 'instagram' ? 12 : 1;
-        
+
         quantum = Math.max(calculatedQuantum, safetyFloor);
 
         // Check if a scheduled job was recently created using the dynamic quantum
@@ -135,16 +135,16 @@ export function startScheduler(): void {
           sessionData,
         };
 
-        await scrapeQueue.add(jobDto.jobType, jobDto, { 
+        await scrapeQueue.add(jobDto.jobType, jobDto, {
           jobId,
           delay: jitterMs // <--- This is the Jitter implementation
         });
 
-        logger.info({ 
-          platform: platform.slug, 
-          jobId, 
-          quantum, 
-          jitterSec: Math.floor(jitterMs / 1000) 
+        logger.info({
+          platform: platform.slug,
+          jobId,
+          quantum,
+          jitterSec: Math.floor(jitterMs / 1000)
         }, 'Scheduler: enqueued feed scrape with jitter');
       }
     } catch (err) {
@@ -158,7 +158,7 @@ export function startScheduler(): void {
   cron.schedule('0 0 * * *', async () => {
     try {
       logger.info('Starting database maintenance and retention task...');
-      
+
       // 1. Delete old raw payloads (configurable TTL)
       const payloadTtl = env.scraper.rawPayloadTtlHours;
       const payloadRes = await db.query(
@@ -175,11 +175,11 @@ export function startScheduler(): void {
       );
 
       logger.info(
-        { 
-          payloadsDeleted: payloadRes.rowCount, 
+        {
+          payloadsDeleted: payloadRes.rowCount,
           postsDeleted: postRes.rowCount,
-          retention: '7 days' 
-        }, 
+          retention: '7 days'
+        },
         'Database maintenance task finished'
       );
     } catch (err) {
